@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inputs } from "../../src/mcp/schemas.js";
+import { inputs, outputs } from "../../src/mcp/schemas.js";
 test("symbol target is a strict discriminated union", () => { assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 1 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 1, qualifiedName: "A" } }).success, false); });
 test("limits are bounded", () => assert.equal(inputs.java_search_symbols.safeParse({ query: "A", limit: 201 }).success, false));
 test("source ranges are ordered and diagnostic scope parameters are unambiguous", () => {
@@ -36,7 +36,10 @@ test("status offers a bounded blocking readiness probe", () => {
 });
 test("targeted tests default to incremental compilation and compact output", () => {
   const result = inputs.java_run_tests.parse({ path: "src/test/java/ExampleTest.java", methodName: "works" });
-  assert.equal(result.compile, "incremental"); assert.equal(result.compileProjectOnly, false); assert.equal(result.includeOutput, false); assert.equal(result.includeStackTrace, false); assert.equal(result.includeTotal, false); assert.equal(result.coverage, undefined);
+  assert.equal(result.compile, "incremental"); assert.equal(result.compileProjectOnly, false); assert.equal(result.includeOutput, false); assert.equal(result.includeStackTrace, false); assert.equal(result.includeTotal, false); assert.equal(result.coverage, undefined); assert.equal(result.debug, false);
+  assert.equal(inputs.java_run_tests.parse({ path: "A.java", debug: true }).debug, true);
+  assert.equal(inputs.java_run_tests.safeParse({ path: "A.java", debug: "true" }).success, false);
+  assert.deepEqual(outputs.java_run_tests.parse({ status: "debugging", debugSessions: [{ sessionId: "s", targetId: "local:1", pid: 1, selectors: ["ExampleTest"] }] }).status, "debugging");
   assert.deepEqual(inputs.java_run_tests.parse({ path: "A.java", coverage: {} }).coverage, { enabled: true, includes: [], details: "files", limit: 50, includeTotal: false });
   assert.equal(inputs.java_run_tests.safeParse({ path: "A.java", coverage: { limit: 201 } }).success, false);
   assert.equal(inputs.java_run_tests.safeParse({ tests: [{ path: "A.java", methodName: "a" }, { path: "B.java", methodName: "b" }] }).success, true);
@@ -56,5 +59,7 @@ test("debug tools enforce state handles and bounded waits", () => {
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into" }).success, false);
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into", threadId: 1, stopId: "x" }).success, true);
   assert.equal(inputs.java_debug_set_breakpoints.safeParse({ sessionId: "s", sourcePath: "A.java", breakpoints: [{ line: 0 }] }).success, false);
+  assert.equal(inputs.java_debug_set_breakpoints.parse({ sessionId: "s", sourcePath: "A.java", breakpoints: [] }).timeoutMs, 5_000);
+  assert.equal(inputs.java_debug_set_breakpoints.safeParse({ sessionId: "s", sourcePath: "A.java", breakpoints: [], timeoutMs: 60_001 }).success, false);
   assert.deepEqual(inputs.java_debug_hot_swap.parse({ sessionId: "s", sourcePaths: ["src/App.java"] }), { sessionId: "s", sourcePaths: ["src/App.java"], dryRun: false });
 });

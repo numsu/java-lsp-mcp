@@ -13,7 +13,7 @@ import { CursorSigner, fingerprint } from "../results/pagination.js";
 import { codePointToUtf16Column, lines, publicLocation } from "../results/positions.js";
 import { resolveCoverageRuntime, resolveTestRuntime } from "../runtime/resolver.js";
 import { createCoverageReport, type CoverageReport } from "../testing/coverage.js";
-import { runJUnit, type JunitRunResult } from "../testing/junit.js";
+import { runJUnit, type JunitRunOptions, type JunitRunResult } from "../testing/junit.js";
 import { JavaLspMcpError, type LspPosition, type LspRange, type PositionTarget, type Snapshot, type SymbolTarget } from "../types.js";
 import { discoverProject } from "../workspace/discovery.js";
 import type { WorkspacePaths } from "../workspace/paths.js";
@@ -27,9 +27,9 @@ import { application } from "../version.js";
 
 const kinds = ["", "file", "module", "namespace", "package", "class", "method", "property", "field", "constructor", "enum", "interface", "function", "variable", "constant", "string", "number", "boolean", "array", "object", "key", "null", "enumMember", "struct", "event", "operator", "typeParameter"];
 const severities = ["", "error", "warning", "info", "hint"] as const;
-interface TestSelectorInput { path: string; className?: string | undefined; methodName?: string | undefined }
+export interface TestSelectorInput { path: string; className?: string | undefined; methodName?: string | undefined }
 interface CoverageInput { enabled: boolean; includes: string[]; details: "summary" | "files"; limit: number; includeTotal: boolean; cursor?: string | undefined }
-interface TestInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined; tests?: TestSelectorInput[] | undefined; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
+export interface TestInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined; tests?: TestSelectorInput[] | undefined; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; debug?: boolean | undefined; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface CachedTestRun extends JunitRunResult { coverage?: CoverageReport }
 interface AffectedTestsInput { target: SymbolTarget; transitive: boolean; maxDepth: number; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface UnusedCodeInput { path?: string | undefined; kinds: ("method" | "constructor" | "field")[]; includeWriteOnly: boolean; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
@@ -209,6 +209,25 @@ export class JavaService {
   }
   async runTests(input: TestInput, signal?: AbortSignal): Promise<object> {
     return this.calculateTestRun(input, signal);
+  }
+  async debugTestLaunches(input: TestInput, signal?: AbortSignal): Promise<JunitRunOptions[]> {
+    if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
+    if (input.coverage) throw new JavaLspMcpError("DEBUG_COVERAGE_UNSUPPORTED", "Coverage is not supported for a suspended debug test launch; run the test normally with coverage after debugging");
+    if (input.vmArgs.some(value => value.includes("jdwp") || value.includes("agentlib:jdwp"))) throw new JavaLspMcpError("DEBUG_VM_ARG_CONFLICT", "Do not pass JDWP arguments in vmArgs when debug=true; the server supplies suspend=y and a local ephemeral debug address");
+    if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
+    const requested = input.tests ?? [{ path: input.path!, ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
+    const prepared = await Promise.all(requested.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path) })));
+    const configuredExclusions = this.excludedProjectRoots(); if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`);
+    if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
+    const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]); if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`);
+    if (input.compile !== "none") await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs);
+    const runtime = resolveTestRuntime(this.config);
+    const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
+      const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName); const classpath = await this.client.testClasspaths(snapshot.uri, input.timeoutMs); const additional = resolveTestClasspathEntries(this.config.testClasspathEntries ?? [], classpath.projectRoot, this.paths.root); const classpaths = [...new Set([...(classpath.classpaths ?? []), ...(classpath.modulepaths ?? []), ...additional])]; if (!classpaths.length) throw new JavaLspMcpError("TEST_CLASSPATH_EMPTY", `JDT returned no test runtime classpath for ${snapshot.path}`); const cwd = input.workingDirectory ? this.paths.resolve(input.workingDirectory) : nearestProjectDirectory(dirname(this.paths.resolve(snapshot.path)), this.paths.root); return { key: `${cwd}\0${classpaths.join("\0")}`, cwd, classpaths, selector: { className, ...(selector.methodName && { methodName: selector.methodName }), sourcePath: snapshot.path } };
+    }));
+    const groups = new Map<string, { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }>();
+    for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+    return [...groups.values()].map(group => ({ java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: [...input.vmArgs, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"], systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: false, includeStackTrace: false, outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groups.size * 3)))) }));
   }
   private async calculateTestRun(input: TestInput, signal?: AbortSignal): Promise<object> {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });

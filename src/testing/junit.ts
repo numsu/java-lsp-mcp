@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
@@ -40,24 +40,18 @@ export interface JunitRunOptions {
   coverage?: { agent: string; includes: string[] };
 }
 
+export interface JunitDebugLaunch {
+  pid: number;
+  reports: string;
+  child: ChildProcess;
+}
+
 export async function runJUnit(options: JunitRunOptions): Promise<JunitRunResult> {
   const reports = await mkdtemp(join(tmpdir(), "java-lsp-mcp-junit-"));
   const started = Date.now();
+  const coverageFile = join(reports, "jacoco.exec");
   try {
-    const selectors = options.selectors.flatMap(selector => selector.methodName ? [`--select-method=${selector.className}#${selector.methodName}`] : [`--select-class=${selector.className}`]);
-    const coverageFile = join(reports, "jacoco.exec");
-    const coverageOptions = [`destfile=${coverageFile}`, "append=false", ...(options.coverage?.includes.length ? [`includes=${options.coverage.includes.join(":")}`] : [])].join(",");
-    const args = [
-      ...options.vmArgs,
-      ...Object.entries(options.systemProperties).map(([key, value]) => `-D${key}=${value}`),
-      "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
-      ...(options.coverage ? [`-javaagent:${options.coverage.agent}=${coverageOptions}`] : []),
-      "-jar", options.console, "execute", "--disable-banner", "--disable-ansi-colors", "--details=none",
-      "--config=junit.jupiter.execution.parallel.enabled=true", "--config=junit.jupiter.execution.parallel.mode.default=concurrent", "--config=junit.jupiter.execution.parallel.mode.classes.default=concurrent",
-      `--reports-dir=${reports}`, `--class-path=${options.classpaths.join(delimiter)}`, ...selectors,
-    ];
-    const argumentFile = join(reports, "java.args");
-    await writeFile(argumentFile, args.map(argumentFileValue).join("\n"), "utf8");
+    const argumentFile = await writeJUnitArgumentFile(options, reports);
     const processResult = await execute(options.java, [`@${argumentFile}`], options.cwd, options.timeoutMs, options.signal, options.outputLimit);
     const parsed = await parseJUnitReports(reports, Object.fromEntries(options.selectors.map(selector => [selector.className, selector.sourcePath])), options.includeStackTrace);
     const failures = parsed.failures;
@@ -77,6 +71,37 @@ export async function runJUnit(options: JunitRunOptions): Promise<JunitRunResult
   } finally {
     await rm(reports, { recursive: true, force: true });
   }
+}
+
+export async function launchJUnit(options: JunitRunOptions): Promise<JunitDebugLaunch> {
+  const reports = await mkdtemp(join(tmpdir(), "java-lsp-mcp-junit-debug-"));
+  try {
+    const argumentFile = await writeJUnitArgumentFile(options, reports);
+    const child = spawn(options.java, [`@${argumentFile}`], { cwd: options.cwd, env: process.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.resume(); child.stderr.resume();
+    child.once("exit", () => { void rm(reports, { recursive: true, force: true }); });
+    child.once("error", () => { void rm(reports, { recursive: true, force: true }); });
+    if (child.pid === undefined) { await rm(reports, { recursive: true, force: true }); throw new Error("JUnit debug process did not expose a PID"); }
+    return { pid: child.pid, reports, child };
+  } catch (error) { await rm(reports, { recursive: true, force: true }); throw error; }
+}
+
+async function writeJUnitArgumentFile(options: JunitRunOptions, reports: string): Promise<string> {
+  const selectors = options.selectors.flatMap(selector => selector.methodName ? [`--select-method=${selector.className}#${selector.methodName}`] : [`--select-class=${selector.className}`]);
+  const coverageFile = join(reports, "jacoco.exec");
+  const coverageOptions = [`destfile=${coverageFile}`, "append=false", ...(options.coverage?.includes.length ? [`includes=${options.coverage.includes.join(":")}`] : [])].join(",");
+  const args = [
+    ...options.vmArgs,
+    ...Object.entries(options.systemProperties).map(([key, value]) => `-D${key}=${value}`),
+    "-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8",
+    ...(options.coverage ? [`-javaagent:${options.coverage.agent}=${coverageOptions}`] : []),
+    "-jar", options.console, "execute", "--disable-banner", "--disable-ansi-colors", "--details=none",
+    "--config=junit.jupiter.execution.parallel.enabled=true", "--config=junit.jupiter.execution.parallel.mode.default=concurrent", "--config=junit.jupiter.execution.parallel.mode.classes.default=concurrent",
+    `--reports-dir=${reports}`, `--class-path=${options.classpaths.join(delimiter)}`, ...selectors,
+  ];
+  const argumentFile = join(reports, "java.args");
+  await writeFile(argumentFile, args.map(argumentFileValue).join("\n"), "utf8");
+  return argumentFile;
 }
 
 async function execute(java: string, args: string[], cwd: string, timeoutMs: number, signal: AbortSignal | undefined, outputLimit: number): Promise<{ code: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean }> {

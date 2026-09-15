@@ -9,7 +9,7 @@ Java semantic intelligence for Model Context Protocol (MCP) clients, powered by 
 - Workspace and dependency navigation
 - Maven, Gradle, Eclipse, modular, and unmanaged projects
 - Current-snapshot diagnostics and ECJ compilation
-- Parallel JUnit tests, affected-test discovery, and JaCoCo coverage
+- Parallel JUnit tests, suspended JDWP test launches, affected-test discovery, and JaCoCo coverage
 - Read-only fixes, refactorings, import, and formatting previews
 - Bounded, paginated agent-friendly results
 
@@ -41,7 +41,7 @@ On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /pro
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
 | `java_diagnostics` | Current-snapshot diagnostics |
 | `java_compile` | ECJ workspace compilation with automatic loaded-prerequisite recovery |
-| `java_run_tests` | JUnit test execution |
+| `java_run_tests` | JUnit execution or suspended JDWP debug launch (`debug: true`) |
 | `java_find_affected_tests` | Statically connected tests |
 | `java_find_unused_code` | Candidate unused private members |
 | `java_code_actions` | Available fixes and refactorings |

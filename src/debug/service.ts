@@ -3,8 +3,9 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Config } from "../config/config.js";
 import type { Logger } from "../logging.js";
 import { JavaLspMcpError } from "../types.js";
-import type { JavaService } from "../mcp/service.js";
+import type { JavaService, TestInput } from "../mcp/service.js";
 import { DebugBridgeClient } from "./bridge-client.js";
+import { launchJUnit } from "../testing/junit.js";
 
 export class DebugService {
   private readonly bridge: DebugBridgeClient;
@@ -12,13 +13,42 @@ export class DebugService {
   targets(input: { query?: string | undefined; includeUnavailable: boolean }): Promise<object> { return this.bridge.request("targets", [input.query, input.includeUnavailable]); }
   attach(input: { targetId: string; timeoutMs: number }): Promise<object> { return this.bridge.request("attach", [input.targetId, input.timeoutMs], input.timeoutMs + 2_000); }
   sessions(): Promise<object> { return this.bridge.request("sessions"); }
-  setBreakpoints(input: { sessionId: string; sourcePath: string; breakpoints: Array<{ line: number }> }): Promise<object> { return this.bridge.request("breakpoints", [input.sessionId, workspacePath(this.config.workspace, input.sourcePath), input.breakpoints.map(v => v.line).join(",")]); }
+  setBreakpoints(input: { sessionId: string; sourcePath: string; breakpoints: Array<{ line: number }>; timeoutMs: number }): Promise<object> { return this.bridge.request("breakpoints", [input.sessionId, workspacePath(this.config.workspace, input.sourcePath), input.breakpoints.map(v => v.line).join(","), input.timeoutMs], input.timeoutMs + 2_000); }
   threads(input: { sessionId: string; includeSystemThreads: boolean }): Promise<object> { return this.bridge.request("threads", [input.sessionId, input.includeSystemThreads]); }
   wait(input: { sessionId: string; timeoutMs: number }): Promise<object> { return this.bridge.request("wait", [input.sessionId, input.timeoutMs], input.timeoutMs + 2_000); }
   stack(input: { sessionId: string; stopId: string; threadId: number; startFrame: number; maxFrames: number }): Promise<object> { return this.bridge.request("stack", [input.sessionId, input.stopId, input.threadId, input.startFrame, input.maxFrames]); }
   variables(input: { sessionId: string; stopId: string; frameId?: string | undefined; valueId?: string | undefined; scope?: string | undefined; start: number; limit: number }): Promise<object> { return this.bridge.request("variables", [input.sessionId, input.stopId, input.frameId, input.valueId, input.scope, input.start, input.limit]); }
   execute(input: { sessionId: string; action: string; threadId?: number | undefined; stopId?: string | undefined; waitTimeoutMs: number }): Promise<object> { return this.bridge.request("execute", [input.sessionId, input.action, input.threadId, input.stopId, input.waitTimeoutMs], input.waitTimeoutMs + 2_000); }
   detach(input: { sessionId: string }): Promise<object> { return this.bridge.request("detach", [input.sessionId]); }
+  async runTests(input: TestInput, signal: AbortSignal): Promise<object> {
+    if (input.debug !== true) throw new JavaLspMcpError("INVALID_STATE", "Debug test launch requires debug=true");
+    const launches = await this.java.debugTestLaunches(input, signal);
+    const sessions: Array<{ sessionId: string; targetId: string; pid: number; selectors: string[] }> = [];
+    const children: Array<{ kill(): boolean }> = [];
+    try {
+      for (const options of launches) {
+        if (signal.aborted) throw signal.reason;
+        const launch = await launchJUnit(options);
+        children.push(launch.child);
+        const targetId = `local:${launch.pid}`;
+        const deadline = Date.now() + Math.min(60_000, input.timeoutMs);
+        let attached: Record<string, unknown> | undefined;
+        let lastError: unknown;
+        while (!attached && Date.now() < deadline) {
+          try { attached = await this.bridge.request("attach", [targetId, Math.max(250, Math.min(2_000, deadline - Date.now()))], 3_000); }
+          catch (error) { lastError = error; await new Promise(resolvePromise => setTimeout(resolvePromise, 100)); }
+        }
+        if (!attached) throw lastError instanceof Error ? lastError : new JavaLspMcpError("ATTACH_TIMEOUT", `Could not attach to debug test JVM ${launch.pid}`);
+        const session = attached.session as Record<string, unknown>;
+        sessions.push({ sessionId: String(session.sessionId), targetId, pid: launch.pid, selectors: options.selectors.map(selector => selector.methodName ? `${selector.className}#${selector.methodName}` : selector.className) });
+      }
+      return { status: "debugging", debugSessions: sessions };
+    } catch (error) {
+      await Promise.all(sessions.map(session => this.bridge.request("detach", [session.sessionId], 3_000).catch(() => undefined)));
+      for (const child of children) child.kill();
+      throw error;
+    }
+  }
   async hotSwap(input: { sessionId: string; sourcePaths: string[]; dryRun: boolean }, signal: AbortSignal): Promise<object> {
     const sourceFiles = input.sourcePaths.map(path => workspacePath(this.config.workspace, path));
     for (const path of sourceFiles) if (!existsSync(path)) throw new JavaLspMcpError("SOURCE_NOT_FOUND", `Source file not found: ${relative(this.config.workspace, path)}`);

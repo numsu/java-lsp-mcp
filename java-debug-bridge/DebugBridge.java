@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 class DebugBridge {
   static final Base64.Decoder DECODER = Base64.getUrlDecoder();
@@ -18,13 +19,17 @@ class DebugBridge {
 
   public static void main(String[] args) throws Exception {
     var reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+    ExecutorService requests = Executors.newCachedThreadPool();
     for (String line; (line = reader.readLine()) != null;) {
       String[] fields = line.split("\t", -1); if (fields.length < 2) continue;
       String id = fields[0], command = fields[1]; String[] values = new String[Math.max(0, fields.length - 2)];
       for (int i = 2; i < fields.length; i++) values[i - 2] = decode(fields[i]);
-      try { reply(id, "OK", dispatch(command, values)); }
-      catch (Throwable error) { reply(id, "ERR", obj("code", code(error), "message", message(error))); }
+      requests.submit(() -> {
+        try { reply(id, "OK", dispatch(command, values)); }
+        catch (Throwable error) { reply(id, "ERR", obj("code", code(error), "message", message(error))); }
+      });
     }
+    requests.shutdown(); requests.awaitTermination(5, TimeUnit.SECONDS);
     for (Session session : SESSIONS.values()) session.detach();
   }
 
@@ -33,7 +38,7 @@ class DebugBridge {
       case "targets" -> targets(get(a, 0), bool(a, 1));
       case "attach" -> attach(get(a, 0), integer(a, 1, 10000));
       case "sessions" -> sessions();
-      case "breakpoints" -> session(a).breakpoints(get(a, 1), get(a, 2));
+      case "breakpoints" -> session(a).breakpoints(get(a, 1), get(a, 2), integer(a, 3, 5000));
       case "threads" -> session(a).threads(bool(a, 1));
       case "wait" -> session(a).waitForStop(integer(a, 1, 30000));
       case "stack" -> session(a).stack(get(a, 1), longValue(a, 2), integer(a, 3, 0), integer(a, 4, 20));
@@ -50,10 +55,11 @@ class DebugBridge {
     for (com.sun.tools.attach.VirtualMachineDescriptor descriptor : com.sun.tools.attach.VirtualMachine.list()) {
       long pid; try { pid = Long.parseLong(descriptor.id()); } catch (NumberFormatException ignored) { continue; }
       Optional<ProcessHandle> process = ProcessHandle.of(pid); String command = process.flatMap(p -> p.info().commandLine()).orElse("");
-      String display = descriptor.displayName().isBlank() ? command : descriptor.displayName();
-      String haystack = (pid + " " + display + " " + command).toLowerCase(Locale.ROOT); if (!query.isBlank() && !haystack.contains(query.toLowerCase(Locale.ROOT))) continue;
-      Jdwp jdwp = Jdwp.parse(command); boolean attachable = jdwp.enabled && Boolean.TRUE.equals(jdwp.server); if (!includeUnavailable && !attachable) continue;
-      values.add(obj("targetId", "local:" + pid, "pid", pid, "displayName", display, "command", emptyNull(command), "jdwp", raw(jdwp.json()), "attachable", jdwp.enabled ? attachable : "unknown", "unavailableReason", jdwp.enabled && !attachable ? "JDWP target is not listening in server mode" : null));
+      Probe probe = command.contains("-agentlib:jdwp=") ? new Probe(command, true) : probeJvmArguments(pid);
+      String fullCommand = (command + " " + probe.arguments).trim(); String display = descriptor.displayName().isBlank() ? fullCommand : descriptor.displayName();
+      String haystack = (pid + " " + display + " " + fullCommand).toLowerCase(Locale.ROOT); if (!query.isBlank() && !haystack.contains(query.toLowerCase(Locale.ROOT))) continue;
+      Jdwp jdwp = Jdwp.parse(fullCommand, probe.known); boolean attachable = jdwp.enabled && Boolean.TRUE.equals(jdwp.server); if (!includeUnavailable && !attachable) continue;
+      values.add(obj("targetId", "local:" + pid, "pid", pid, "displayName", display, "command", emptyNull(fullCommand), "jdwp", raw(jdwp.json()), "attachable", jdwp.enabled ? attachable : (jdwp.known ? false : "unknown"), "unavailableReason", jdwp.enabled && !attachable ? "JDWP target is not listening in server mode" : null));
     }
     return obj("targets", raw(array(values)));
   }
@@ -71,23 +77,40 @@ class DebugBridge {
   static Session session(String[] args) { Session value = SESSIONS.get(get(args, 0)); if (value == null) throw new DebugFailure("SESSION_NOT_FOUND", "Debug session not found"); return value; }
 
   static final class Session {
-    final String id, targetId; final long pid; final VirtualMachine vm; final BlockingQueue<Stop> stops = new LinkedBlockingQueue<>(); final AtomicLong stopSequence = new AtomicLong();
+    final String id, targetId; final long pid; final VirtualMachine vm; final BlockingQueue<Stop> stops = new LinkedBlockingQueue<>(); final AtomicLong stopSequence = new AtomicLong(); volatile EventSet startupSuspension;
     final Map<String, Value> values = new ConcurrentHashMap<>(); final List<LogicalBreakpoint> breakpoints = new CopyOnWriteArrayList<>(); volatile Stop current; volatile String state = "running"; volatile boolean closed;
     Session(String id, String targetId, long pid, VirtualMachine vm) { this.id = id; this.targetId = targetId; this.pid = pid; this.vm = vm; }
     void start() { ClassPrepareRequest request = vm.eventRequestManager().createClassPrepareRequest(); request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD); request.enable(); Thread.ofPlatform().daemon().name("jdi-events-" + pid).start(this::events); }
     String info() { return obj("session", raw(obj("sessionId", id, "targetId", targetId, "pid", pid, "vmName", vm.name(), "vmVersion", vm.version(), "state", state, "attachedAt", Instant.now().toString(), "capabilities", raw(obj("canRedefineClasses", vm.canRedefineClasses(), "canPopFrames", vm.canPopFrames(), "canGetBytecodes", vm.canGetBytecodes(), "canGetSyntheticAttribute", vm.canGetSyntheticAttribute(), "canWatchFieldAccess", vm.canWatchFieldAccess(), "canWatchFieldModification", vm.canWatchFieldModification()))))); }
     String summary() { return obj("sessionId", id, "targetId", targetId, "pid", pid, "displayName", vm.name(), "state", state, "stopId", current == null ? null : current.id, "stoppedThreads", current == null ? raw("[]") : raw("[" + current.thread.uniqueID() + "]")); }
-    void events() { try { while (!closed) { EventSet set = vm.eventQueue().remove(); boolean hold = false; for (Event event : set) { if (event instanceof ClassPrepareEvent prepared) installPending(prepared.referenceType()); else if (event instanceof BreakpointEvent breakpoint) { enqueue("breakpoint", breakpoint.thread(), breakpoint.location(), set, logicalId((BreakpointRequest) breakpoint.request())); hold = true; } else if (event instanceof StepEvent step) { step.request().disable(); vm.eventRequestManager().deleteEventRequest(step.request()); enqueue("step", step.thread(), step.location(), set, null); hold = true; } else if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) { state = "terminated"; closed = true; stops.offer(Stop.terminal(state)); hold = true; } } if (!hold) set.resume(); } } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); } catch (VMDisconnectedException ignored) { state = "disconnected"; stops.offer(Stop.terminal(state)); } }
+    void events() { try { while (!closed) { EventSet set = vm.eventQueue().remove(); boolean hold = false; for (Event event : set) { if (event instanceof VMStartEvent) { startupSuspension = set; hold = true; } else if (event instanceof ClassPrepareEvent prepared) installPending(prepared.referenceType()); else if (event instanceof BreakpointEvent breakpoint) { enqueue("breakpoint", breakpoint.thread(), breakpoint.location(), set, logicalId((BreakpointRequest) breakpoint.request())); hold = true; } else if (event instanceof StepEvent step) { step.request().disable(); vm.eventRequestManager().deleteEventRequest(step.request()); enqueue("step", step.thread(), step.location(), set, null); hold = true; } else if (event instanceof VMDeathEvent || event instanceof VMDisconnectEvent) { state = "terminated"; closed = true; stops.offer(Stop.terminal(state)); hold = true; } } if (!hold) set.resume(); } } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); } catch (VMDisconnectedException ignored) { state = "disconnected"; stops.offer(Stop.terminal(state)); } }
     synchronized void enqueue(String reason, ThreadReference thread, Location location, EventSet set, String breakpointId) { String stopId = "stop:" + stopSequence.incrementAndGet(); current = new Stop(stopId, reason, thread, location, set, breakpointId, null); values.clear(); state = "stopped"; stops.offer(current); }
     String waitForStop(int timeout) throws InterruptedException { Stop stop = stops.poll(timeout, TimeUnit.MILLISECONDS); if (stop == null) return obj("outcome", "timeout", "state", state); if (stop.terminal != null) return obj("outcome", stop.terminal); return stop.json(); }
-    synchronized String execute(String action, String threadText, String stopId, int wait) throws Exception {
-      Stop stop = stopId.isBlank() && action.equals("continue") ? current : requireStop(stopId); if (stop == null) throw new DebugFailure("INVALID_STATE", "Target VM is not stopped"); if (!action.equals("continue")) { long threadId = Long.parseLong(threadText); if (threadId != stop.thread.uniqueID()) throw new DebugFailure("THREAD_NOT_SUSPENDED", "Stepping requires the thread from the current stop"); int depth = switch (action) { case "step_over" -> StepRequest.STEP_OVER; case "step_into" -> StepRequest.STEP_INTO; case "step_out" -> StepRequest.STEP_OUT; default -> throw new DebugFailure("INVALID_STATE", "Unknown execution action: " + action); }; StepRequest request = vm.eventRequestManager().createStepRequest(stop.thread, StepRequest.STEP_LINE, depth); request.addCountFilter(1); request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD); request.enable(); }
-      current = null; values.clear(); state = "running"; stop.set.resume(); if (wait > 0) return waitForStop(wait); return obj("outcome", "running");
+    String execute(String action, String threadText, String stopId, int wait) throws Exception {
+      Stop stop; EventSet startup = null;
+      synchronized (this) {
+        stop = stopId.isBlank() && action.equals("continue") ? current : requireStop(stopId);
+        if (stop == null && action.equals("continue") && startupSuspension != null) {
+          startup = startupSuspension; startupSuspension = null; state = "running";
+        } else {
+          if (stop == null) throw new DebugFailure("INVALID_STATE", "Target VM is not stopped");
+          if (!action.equals("continue")) {
+            long threadId = Long.parseLong(threadText); if (threadId != stop.thread.uniqueID()) throw new DebugFailure("THREAD_NOT_SUSPENDED", "Stepping requires the thread from the current stop");
+            int depth = switch (action) { case "step_over" -> StepRequest.STEP_OVER; case "step_into" -> StepRequest.STEP_INTO; case "step_out" -> StepRequest.STEP_OUT; default -> throw new DebugFailure("INVALID_STATE", "Unknown execution action: " + action); };
+            StepRequest request = vm.eventRequestManager().createStepRequest(stop.thread, StepRequest.STEP_LINE, depth); request.addCountFilter(1); request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD); request.enable();
+          }
+          current = null; values.clear(); state = "running";
+        }
+      }
+      if (startup != null) startup.resume(); else stop.set.resume();
+      if (wait > 0) return waitForStop(wait); return obj("outcome", "running");
     }
-    synchronized String breakpoints(String sourcePath, String linesText) {
+    synchronized String breakpoints(String sourcePath, String linesText, int timeout) throws InterruptedException {
       for (LogicalBreakpoint bp : breakpoints) if (bp.source.equals(sourcePath)) bp.delete(vm);
       breakpoints.removeIf(bp -> bp.source.equals(sourcePath)); List<String> result = new ArrayList<>();
       if (!linesText.isBlank()) for (String text : linesText.split(",")) { LogicalBreakpoint bp = new LogicalBreakpoint(token("bp"), sourcePath, Integer.parseInt(text)); breakpoints.add(bp); bp.install(vm, null); result.add(bp.json()); }
+      long deadline = System.currentTimeMillis() + timeout;
+      while (System.currentTimeMillis() < deadline && breakpoints.stream().filter(bp -> bp.source.equals(sourcePath)).anyMatch(bp -> bp.requests.isEmpty())) { Thread.sleep(25); }
       return obj("sourcePath", sourcePath, "breakpoints", raw(array(result)));
     }
     void installPending(ReferenceType type) { for (LogicalBreakpoint bp : breakpoints) if (bp.requests.isEmpty()) bp.install(vm, type); }
@@ -115,7 +138,7 @@ class DebugBridge {
     }
     List<String> obsoleteFrames() { List<String> result = new ArrayList<>(); for (ThreadReference thread : vm.allThreads()) if (thread.isSuspended()) try { List<StackFrame> frames = thread.frames(); for (int i = 0; i < frames.size(); i++) { Method method = frames.get(i).location().method(); if (method.isObsolete()) result.add(obj("threadId", thread.uniqueID(), "className", method.declaringType().name(), "methodName", method.name(), "obsolete", true)); } } catch (IncompatibleThreadStateException ignored) {} return result; }
     Stop requireStop(String id) { Stop stop = current; if (stop == null) throw new DebugFailure("INVALID_STATE", "Target VM is not stopped"); if (id.isBlank() || !stop.id.equals(id)) throw new DebugFailure("STALE_STOP", "The VM has resumed since this stop was created"); return stop; }
-    void detach() { closed = true; Stop stop = current; current = null; try { if (stop != null) stop.set.resume(); vm.dispose(); } catch (Exception ignored) {} state = "disconnected"; }
+    void detach() { closed = true; Stop stop = current; current = null; EventSet startup = startupSuspension; startupSuspension = null; try { if (stop != null) stop.set.resume(); if (startup != null) startup.resume(); vm.dispose(); } catch (Exception ignored) {} state = "disconnected"; }
   }
 
   static final class LogicalBreakpoint { final String id, source; final int line; final List<BreakpointRequest> requests = new CopyOnWriteArrayList<>(); String message;
@@ -127,7 +150,20 @@ class DebugBridge {
   record Stop(String id, String reason, ThreadReference thread, Location location, EventSet set, String breakpointId, String terminal) { static Stop terminal(String state) { return new Stop("", "", null, null, null, null, state); } String json() { return obj("outcome", "stopped", "stopId", id, "reason", reason, "threadId", thread.uniqueID(), "location", raw(DebugBridge.location(location)), "breakpointId", breakpointId); } }
   record NamedValue(String name, String type, Value value) {}
   record Raw(String value) {}
-  record Jdwp(boolean enabled, String transport, Boolean server, Boolean suspend, String address) { static Jdwp parse(String command) { int at = command.indexOf("-agentlib:jdwp="); if (at < 0) return new Jdwp(false, null, null, null, null); String options = command.substring(at + 15).split("\\s", 2)[0]; Map<String,String> map = new HashMap<>(); for (String item : options.split(",")) { String[] pair = item.split("=", 2); if (pair.length == 2) map.put(pair[0], pair[1]); } return new Jdwp(true, map.get("transport"), yes(map.get("server")), yes(map.get("suspend")), map.get("address")); } String json() { return obj("status", enabled ? "enabled" : "not_enabled", "transport", transport, "server", server, "suspend", suspend, "address", address); } static Boolean yes(String value) { return value == null ? null : value.equalsIgnoreCase("y"); } }
+  record Probe(String arguments, boolean known) {}
+  static Probe probeJvmArguments(long pid) {
+    AtomicReference<Probe> result = new AtomicReference<>(new Probe("", false));
+    Thread probe = Thread.ofPlatform().daemon().name("attach-probe-" + pid).start(() -> {
+      com.sun.tools.attach.VirtualMachine attached = null;
+      try { attached = com.sun.tools.attach.VirtualMachine.attach(String.valueOf(pid)); Properties properties = attached.getAgentProperties(); result.set(new Probe(properties.getProperty("sun.jvm.args", ""), true)); }
+      catch (Throwable ignored) { }
+      finally { if (attached != null) try { attached.detach(); } catch (IOException ignored) {} }
+    });
+    try { probe.join(750); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+    if (probe.isAlive()) probe.interrupt();
+    return result.get();
+  }
+  record Jdwp(boolean enabled, boolean known, String transport, Boolean server, Boolean suspend, String address) { static Jdwp parse(String command, boolean known) { int at = command.indexOf("-agentlib:jdwp="); if (at < 0) return new Jdwp(false, known, null, null, null, null); String options = command.substring(at + 15).split("\\s", 2)[0]; Map<String,String> map = new HashMap<>(); for (String item : options.split(",")) { String[] pair = item.split("=", 2); if (pair.length == 2) map.put(pair[0], pair[1]); } return new Jdwp(true, true, map.get("transport"), yes(map.get("server")), yes(map.get("suspend")), map.get("address")); } String json() { return obj("status", enabled ? "enabled" : known ? "not_enabled" : "unknown", "transport", transport, "server", server, "suspend", suspend, "address", address); } static Boolean yes(String value) { return value == null ? null : value.equalsIgnoreCase("y"); } }
   static final class DebugFailure extends RuntimeException { final String code; DebugFailure(String code, String message) { super(message); this.code = code; } }
 
   static String className(byte[] bytes) throws IOException { try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes))) { if (in.readInt() != 0xCAFEBABE) throw new IOException("Invalid class file"); in.readUnsignedShort(); in.readUnsignedShort(); int count = in.readUnsignedShort(); Object[] pool = new Object[count]; for (int i=1;i<count;i++) { int tag=in.readUnsignedByte(); switch(tag) { case 1 -> pool[i]=in.readUTF(); case 3,4 -> in.readInt(); case 5,6 -> { in.readLong(); i++; } case 7,8,16,19,20 -> pool[i]=in.readUnsignedShort(); case 9,10,11,12,17,18 -> { in.readUnsignedShort(); in.readUnsignedShort(); } case 15 -> { in.readUnsignedByte(); in.readUnsignedShort(); } default -> throw new IOException("Unknown class constant tag " + tag); } } in.readUnsignedShort(); int thisClass=in.readUnsignedShort(); return ((String)pool[(Integer)pool[thisClass]]).replace('/', '.'); } }
@@ -140,7 +176,7 @@ class DebugBridge {
   static String display(Value v) { if (v == null) return "null"; if (v instanceof StringReference s) { String x=s.value(); return x.length()>1000 ? x.substring(0,1000)+"…" : x; } if (v instanceof PrimitiveValue) return v.toString(); if (v instanceof ArrayReference a) return a.type().name()+"["+a.length()+"]"; if (v instanceof ObjectReference o) return o.referenceType().name()+"@"+Long.toHexString(o.uniqueID()); return v.toString(); }
   static String code(Throwable e) { if (e instanceof DebugFailure d) return d.code; if (e instanceof VMDisconnectedException) return "SESSION_DISCONNECTED"; if (e instanceof UnsupportedOperationException) return "UNSUPPORTED_CAPABILITY"; if (e instanceof ClassFormatError || e instanceof VerifyError || e instanceof UnsupportedClassVersionError) return "REDEFINE_FAILED"; return "DEBUG_ERROR"; }
   static String message(Throwable e) { return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(); }
-  static void reply(String id, String status, String json) { System.out.println(id + "\t" + status + "\t" + ENCODER.encodeToString(json.getBytes(StandardCharsets.UTF_8))); System.out.flush(); }
+  static synchronized void reply(String id, String status, String json) { System.out.println(id + "\t" + status + "\t" + ENCODER.encodeToString(json.getBytes(StandardCharsets.UTF_8))); System.out.flush(); }
   static String decode(String text) { return new String(DECODER.decode(text), StandardCharsets.UTF_8); }
   static String token(String prefix) { return prefix + ":" + Long.toUnsignedString(IDS.incrementAndGet(), 36); }
   static String get(String[] a, int i) { return i < a.length ? a[i] : ""; }
