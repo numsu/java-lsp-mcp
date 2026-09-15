@@ -197,7 +197,7 @@ export class JavaService {
     if (!compilation) {
       const start = Date.now(); const deadline = operationalDeadline(input.timeoutMs); const buildFailures: string[] = []; let buildStatus = -1, excludedRoots: string[] = []; this.successfulTestCompilations.clear(); const diagnosticsEpoch = this.client.diagnostics.currentEpoch();
       try { const build = await this.enqueueBuild(() => this.configuredBuild(input.kind === "clean", remaining(deadline))); buildStatus = build.status; excludedRoots = build.excludedRoots; } catch (error) { buildFailures.push(String(error)); }
-      if (buildStatus === 2 && Date.now() < deadline) await this.client.diagnostics.settleAfter(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      if (buildStatus === 2 && Date.now() < deadline) await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
       const entries = this.client.diagnostics.all().filter(set => !excludedRoots.some(root => fileUriWithin(set.uri, root))).flatMap(set => set.diagnostics.filter(d => severityRank(d) <= severityNameRank(input.minimumSeverity)).map(diagnostic => ({ uri: set.uri, diagnostic })));
       const status = buildStatusName(buildStatus); const success = status === "succeeded"; const diagnosticsComplete = status === "succeeded" || status === "with-errors" && entries.some(entry => entry.diagnostic.severity === 1);
       if (success) this.successfulTestCompilations.set("workspace", { generation: this.sync.indexGeneration, clean: input.kind === "clean" });
@@ -506,7 +506,14 @@ export class JavaService {
   private enqueueBuild<T>(work: () => Promise<T>): Promise<T> { return this.buildQueue.run(work); }
   private async configuredBuild(clean: boolean, timeoutMs: number, requiredUris: string[] = [], projectOnly = false): Promise<{ status: number; excludedRoots: string[]; builtRoots?: string[] }> {
     const selectors = [...new Set((this.config.excludedProjects ?? []).map(normalizeProjectSelector).filter(Boolean))];
-    if (!selectors.length && !projectOnly) return { status: await this.client.build(clean, timeoutMs), excludedRoots: [] };
+    if (!selectors.length && !projectOnly) {
+      const deadline = operationalDeadline(timeoutMs); const diagnosticsEpoch = this.client.diagnostics.currentEpoch?.() ?? 0; const status = await this.client.build(clean, remaining(deadline));
+      if (status !== 2 || Date.now() >= deadline) return { status, excludedRoots: [] };
+      await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      if (!this.client.diagnostics.all().some(set => set.diagnostics.some(item => prerequisiteProjectName(item.message)))) return { status, excludedRoots: [] };
+      const projects = await this.client.projects(remaining(deadline)); const recovery = await this.buildProjectsWithPrerequisites(projects, projects, clean, remaining(deadline));
+      return { status: recovery.status, excludedRoots: [] };
+    }
     const projects = await this.client.projects(timeoutMs); const matches = new Map(selectors.map(selector => [selector, false]));
     const importedExcludedRoots = projects.filter(uri => selectors.some(selector => { const matched = projectMatches(this.paths.root, uri, selector); if (matched) matches.set(selector, true); return matched; })); const filesystem = this.excludedProjectRoots(); for (const selector of selectors) if (!filesystem.missing.includes(selector)) matches.set(selector, true); const excludedRoots = [...new Set([...importedExcludedRoots, ...filesystem.roots])];
     const missing = [...matches].filter(([, matched]) => !matched).map(([selector]) => selector);
@@ -516,7 +523,32 @@ export class JavaService {
     if (!included.length) throw new JavaLspMcpError("NO_INCLUDED_PROJECTS", "Every JDT project is excluded from compilation");
     const selected = projectOnly ? included.filter(root => requiredUris.some(uri => fileUriWithin(uri, root))) : included;
     if (!selected.length) throw new JavaLspMcpError("TEST_PROJECT_NOT_FOUND", "No included JDT project contains the selected tests");
-    return { status: await this.client.buildProjects(selected, clean, timeoutMs), excludedRoots, ...(projectOnly && { builtRoots: selected }) };
+    const build = await this.buildProjectsWithPrerequisites(selected, included, clean, timeoutMs);
+    return { status: build.status, excludedRoots, ...(projectOnly && { builtRoots: build.builtRoots }) };
+  }
+  private async buildProjectsWithPrerequisites(selected: string[], eligible: string[], clean: boolean, timeoutMs: number): Promise<{ status: number; builtRoots: string[] }> {
+    const deadline = operationalDeadline(timeoutMs); const builtRoots = new Set(selected); const visiting = new Set<string>(); const attempted = new Set<string>();
+    const projectsByName = new Map<string, string[]>();
+    for (const uri of eligible) { const name = projectUriName(uri); projectsByName.set(name, [...(projectsByName.get(name) ?? []), uri]); }
+    const build = async (roots: string[]): Promise<number> => {
+      const diagnosticsEpoch = this.client.diagnostics.currentEpoch?.() ?? 0; const status = await this.client.buildProjects(roots, clean, remaining(deadline));
+      if (status !== 2 || Date.now() >= deadline) return status;
+      await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      let recovered = false;
+      for (const root of roots) {
+        const names = this.client.diagnostics.all().filter(set => fileUriWithin(set.uri, root)).flatMap(set => set.diagnostics.map(item => prerequisiteProjectName(item.message)).filter((name): name is string => Boolean(name)));
+        for (const name of new Set(names)) {
+          const matches = projectsByName.get(name) ?? []; const prerequisite = matches.length === 1 ? matches[0] : undefined; const edge = root + "\0" + (prerequisite ?? name);
+          if (!prerequisite || visiting.has(prerequisite) || attempted.has(edge)) continue;
+          attempted.add(edge); visiting.add(root); builtRoots.add(prerequisite);
+          const prerequisiteStatus = await build([prerequisite]); visiting.delete(root);
+          if (prerequisiteStatus !== 1) return prerequisiteStatus;
+          recovered = true;
+        }
+      }
+      return recovered ? build(roots) : status;
+    };
+    return { status: await build(selected), builtRoots: [...builtRoots] };
   }
   private excludedProjectRoots(): { roots: string[]; missing: string[] } { return this.excludedRootsCache ??= resolveExcludedProjectRoots(this.paths.root, this.config.excludedProjects ?? []); }
   private paginate<T>(values: T[], limit: number, cursor: string | undefined, query: object, envelope: (items: T[]) => object): { items: T[]; nextCursor?: string } {
@@ -564,6 +596,8 @@ function hoverText(value: unknown): string { if (!value || typeof value !== "obj
 function severityRank(d: Diagnostic): number { return d.severity ?? 3; }
 function severityNameRank(name: string): number { return Math.max(1, severities.indexOf(name as typeof severities[number])); }
 function buildStatusName(status: number): "failed" | "succeeded" | "with-errors" | "cancelled" | "unknown" { return (["failed", "succeeded", "with-errors", "cancelled"] as const)[status] ?? "unknown"; }
+function prerequisiteProjectName(message: string): string | undefined { return /^The project cannot be built until its prerequisite (.+) is built\.(?: |$)/u.exec(message)?.[1]?.trim(); }
+function projectUriName(uri: string): string { try { return basename(fileURLToPath(uri)); } catch { return ""; } }
 function jdtSymbolQuery(query: string, mode: string): string {
   if (mode === "prefix") return `${query}*`;
   if (mode === "fuzzy") return `*${[...query].join("*")}*`;

@@ -129,6 +129,13 @@ test("compile collects diagnostics published immediately after a with-errors bui
   assert.equal(result.success, false); assert.equal(result.diagnosticsComplete, true); assert.equal((result.diagnostics as object[]).length, 1); assert.equal(result.message, undefined);
 });
 
+test("workspace compilation builds a loaded prerequisite and retries internally", async () => {
+  const workspace = resolve("test/fixtures/unmanaged"); const logicUri = pathToFileURL(resolve(workspace, "logic")).href; const testsUri = pathToFileURL(resolve(workspace, "tests")).href; const projectBuilds: string[][] = []; let sets: object[] = [];
+  const client = { state: "ready", waitReady: async () => true, build: async () => { sets = [{ uri: `${testsUri}/src/T.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite logic is built. Cleaning and building all projects is recommended" }] }]; return 2; }, projects: async () => [logicUri, testsUri], buildProjects: async (uris: string[]) => { projectBuilds.push(uris); if (projectBuilds.length === 1) { sets = [{ uri: `${testsUri}/src/T.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite logic is built. Cleaning and building all projects is recommended" }] }]; return 2; } sets = []; return 1; }, diagnostics: { currentEpoch: () => projectBuilds.length, settleAfter: async () => true, all: () => sets } } as unknown as LspClient;
+  const result = await new JavaService({ ...config, workspace }, paths, sync, client).compile({ kind: "incremental", minimumSeverity: "error", includeText: false, timeoutMs: 1000, limit: 100, includeTotal: false }) as { success: boolean };
+  assert.equal(result.success, true);
+  assert.deepEqual(projectBuilds, [[logicUri, testsUri], [logicUri], [logicUri, testsUri]]);
+});
 test("compilation pagination reuses the build result", async () => {
   let builds = 0; const diagnostics = [writeRange, readRange].map((range, index) => ({ range, severity: 2, message: `warning ${index}` }));
   const client = { state: "ready", waitReady: async () => true, build: async () => { builds++; return 1; }, diagnostics: { currentEpoch: () => 1, all: () => [{ uri: snapshot.uri, epoch: 1, diagnostics, receivedAt: 1 }] } } as unknown as LspClient;
@@ -172,6 +179,15 @@ test("compileProjectOnly builds only the JDT project containing the selected tes
   await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(request), /no test runtime classpath/u); assert.deepEqual(built, [testsUri]);
 });
 
+test("project-only compilation recursively builds loaded prerequisites and retries", async () => {
+  const workspace = resolve("test/fixtures/unmanaged"); const coreUri = pathToFileURL(resolve(workspace, "core")).href; const logicUri = pathToFileURL(resolve(workspace, "logic")).href; const testsUri = pathToFileURL(resolve(workspace, "tests")).href; const calls: string[][] = []; let sets: object[] = [];
+  const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, projects: async () => [coreUri, logicUri, testsUri], buildProjects: async (uris: string[]) => { calls.push(uris); const root = uris[0]; if (root === testsUri && calls.filter(call => call[0] === testsUri).length === 1) { sets = [{ uri: `${testsUri}/src/T.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite logic is built. Cleaning and building all projects is recommended" }] }]; return 2; } if (root === logicUri && calls.filter(call => call[0] === logicUri).length === 1) { sets = [{ uri: `${logicUri}/src/L.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite core is built. Cleaning and building all projects is recommended" }] }]; return 2; } sets = []; return 1; }, diagnostics: { currentEpoch: () => calls.length, settleAfter: async () => true, all: () => sets }, testClasspaths: async () => ({}) } as unknown as LspClient;
+  const localSnapshot = { ...snapshot, path: "tests/src/A.java", uri: `${testsUri}/src/A.java` }; const localSync = { indexGeneration: 1, verify: async () => localSnapshot, flush: async () => {}, snapshots: { all: () => [localSnapshot] } } as unknown as WorkspaceSynchronizer;
+  const localPaths = { root: workspace, fromUri: () => ({ path: localSnapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
+  const request = { path: localSnapshot.path, compile: "incremental" as const, compileProjectOnly: true, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(request), /no test runtime classpath/u);
+  assert.deepEqual(calls, [[testsUri], [logicUri], [coreUri], [logicUri], [testsUri]]);
+});
 test("failed test compilation is not reused", async () => {
   let builds = 0;
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, build: async () => { builds++; return 2; }, diagnostics: { all: () => [] } } as unknown as LspClient;

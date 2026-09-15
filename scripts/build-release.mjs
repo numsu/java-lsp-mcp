@@ -15,6 +15,7 @@ await rm(stageRoot, { recursive: true, force: true });
 execFileSync(process.execPath, ["scripts/fetch-runtime.mjs", "--platform", platform, "--output", join(bundle, "runtime"), "--cache", resolve(".runtime/downloads")], { stdio: "inherit" });
 await Promise.all([mkdir(join(bundle, "app"), { recursive: true }), mkdir(join(bundle, "bin"), { recursive: true }), mkdir(join(bundle, "licenses"), { recursive: true })]);
 await cp("dist/server.mjs", join(bundle, "app", "server.mjs"));
+await cp("dist/runtime/debug", join(bundle, "runtime", "debug"), { recursive: true });
 await cp("third_party/notices/THIRD_PARTY_NOTICES.md", join(bundle, "licenses", "THIRD_PARTY_NOTICES.md"));
 await cp("README.md", join(bundle, "README.txt"));
 await cp("runtime/versions.lock.json", join(bundle, "manifest.json"));
@@ -43,7 +44,7 @@ try {
     await rm(join(finalRoot, "java-lsp-mcp", name), { recursive: true, force: true });
     await cp(join(bundle, name), join(finalRoot, "java-lsp-mcp", name), { recursive: true });
   }
-  for (const name of ["node", "jdtls", "junit-console", "jacoco"]) {
+  for (const name of ["node", "jdtls", "junit-console", "jacoco", "debug"]) {
     const destination = join(finalRoot, "java-lsp-mcp", "runtime", name);
     if (!await exists(destination)) await cp(join(bundle, "runtime", name), destination, { recursive: true });
   }

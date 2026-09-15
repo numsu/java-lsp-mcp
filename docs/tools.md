@@ -10,11 +10,33 @@ Run `java-lsp-mcp describe-tools` for complete schemas.
 
 ## Validation and analysis
 
-`java_diagnostics` reads current-snapshot diagnostics. `java_compile` runs ECJ against JDT's imported model, not a Maven/Gradle lifecycle. `java_run_tests` executes one or up to 100 selectors. `java_find_affected_tests` performs static candidate selection; full CI remains authoritative. `java_find_unused_code` returns review candidates because reflection and frameworks can create implicit use.
+`java_diagnostics` reads current-snapshot diagnostics. `java_compile` runs ECJ against JDT's imported model, not a Maven/Gradle lifecycle. When a build is blocked because a loaded project prerequisite has not been built, compilation recursively builds that prerequisite and retries the dependent project. This recovery is automatic and remains subject to the shared timeout and configured project exclusions. `java_run_tests` executes one or up to 100 selectors. `java_find_affected_tests` performs static candidate selection; full CI remains authoritative. `java_find_unused_code` returns review candidates because reflection and frameworks can create implicit use.
 
 ## Edit previews
 
 `java_code_actions` lists JDT actions. `java_edit_preview` previews rename, action, imports, or formatting as hash-bound edits and optional diffs. Neither applies changes. External paths, overlaps, stale bases, and concurrent changes are rejected.
+
+## JDWP debugging
+
+Debug tools support local JVMs that were started with the JDWP agent in server mode, for example:
+
+```text
+java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:0 -jar app.jar
+```
+
+The server never loads an agent into an ordinary JVM. `java_debug_targets` lists local JVM descriptors and, when their command line is visible, reports whether JDWP is enabled. Only `server=y` targets are attachable; a target started with `server=n` connects outward to its configured debugger and is reported as unavailable. Listing is read-only and does not test-attach. Use the opaque `targetId` with `java_debug_attach`; Eclipse or another debugger must detach first because a JDWP target normally serves one debugger connection.
+
+`java_debug_sessions` lists sessions owned by this MCP server. `java_debug_detach` resumes an event suspension owned by the session, disposes the debugger connection, and does not terminate the target JVM.
+
+`java_debug_set_breakpoints` replaces all breakpoints for one workspace-relative source path. An empty array clears that source's breakpoints. Breakpoints for unloaded classes are `pending` and are resolved on class preparation. The requested source must have line-number debug information.
+
+`java_debug_wait_for_stop` waits up to `timeoutMs` for a breakpoint or step event. `timeout` is a successful, non-error outcome. A stop returns `stopId` and `threadId`. Pass both to `java_debug_stack_trace`, then pass a returned `frameId` to `java_debug_variables`. Objects and arrays return a `valueId` for bounded, paginated expansion. All frame and value handles become stale when execution resumes.
+
+`java_debug_execute` accepts `continue`, `step_over`, `step_into`, or `step_out`. Step actions require the current `stopId` and stopped `threadId`. Set `waitTimeoutMs` to combine resume and the next bounded event wait without a race; zero returns as soon as the target is running.
+
+`java_debug_hot_swap` first runs an incremental ECJ workspace build, locates class files produced for `sourcePaths`, and calls JDI class redefinition for loaded classes. A successful `dryRun` returns `outcome: "validated"` after compiling and resolving candidates without changing the JVM. A standard HotSpot JVM generally permits method-body changes but rejects added or removed fields or methods, signature changes, hierarchy changes, and similar class-schema changes. Active frames continue the previous bytecode until they return. JDI removes breakpoints in redefined classes, so the server resolves and installs the logical source breakpoints again after a successful replacement.
+
+JDWP grants debugger-level control over the target process. Bind it only to a trusted local interface or otherwise secure access to the debug transport.
 
 ## Conventions
 

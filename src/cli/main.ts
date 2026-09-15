@@ -6,6 +6,7 @@ import { JdtSupervisor } from "../jdtls/supervisor.js";
 import { Logger } from "../logging.js";
 import { buildMcpServer, describeTools } from "../mcp/server.js";
 import { JavaService } from "../mcp/service.js";
+import { DebugService } from "../debug/service.js";
 import { defaultJdtlsHome, workspaceCacheDirectory } from "../runtime/resolver.js";
 import { application } from "../version.js";
 import { WorkspacePaths } from "../workspace/paths.js";
@@ -29,8 +30,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 async function serve(config: Config): Promise<number> {
   const logger = new Logger(config.logLevel); const paths = new WorkspacePaths(config.workspace); const supervisor = new JdtSupervisor(config, logger); const sync = new WorkspaceSynchronizer(paths, supervisor.client, logger, config.sourceEncoding); await sync.start();
   void supervisor.start().catch(error => { supervisor.client.state = "failed"; supervisor.client.statusMessage = error instanceof Error ? error.message : String(error); logger.error("JDT LS startup failed", supervisor.client.statusMessage); });
-  const service = new JavaService(config, paths, sync, supervisor.client); const handle = serveStdio(() => buildMcpServer(service, config, logger), { legacy: "serve", onerror: error => logger.error("MCP transport", error.message) });
-  let stopping: Promise<void> | undefined; const stop = (): Promise<void> => stopping ??= (async () => { await handle.close(); await sync.close(); await supervisor.stop(); })();
+  const service = new JavaService(config, paths, sync, supervisor.client); const debug = new DebugService(config, logger, service); const handle = serveStdio(() => buildMcpServer(service, config, logger, debug), { legacy: "serve", onerror: error => logger.error("MCP transport", error.message) });
+  let stopping: Promise<void> | undefined; const stop = (): Promise<void> => stopping ??= (async () => { await handle.close(); await debug.close(); await sync.close(); await supervisor.stop(); })();
   process.once("SIGINT", () => void stop()); process.once("SIGTERM", () => void stop()); process.stdin.once("end", () => void stop()); return 0;
 }
 function doctor(config: Config): number { const checks: { name: string; ok: boolean; detail: string }[] = []; try { const p = new WorkspacePaths(config.workspace); checks.push({ name: "workspace", ok: true, detail: p.root }); } catch (e) { checks.push({ name: "workspace", ok: false, detail: String(e) }); } const jdk = config.toolingJdk ?? process.env.JAVA_HOME; const java = jdk ? join(jdk, "bin", process.platform === "win32" ? "java.exe" : "java") : undefined; const jdtls = config.jdtlsHome ?? defaultJdtlsHome(); checks.push({ name: "tooling JDK", ok: Boolean(java && existsSync(java)), detail: java ? `${java}${!config.toolingJdk ? " (JAVA_HOME)" : ""}` : "JAVA_HOME is not set" }, { name: "JDT LS", ok: existsSync(jdtls), detail: jdtls }, { name: "compiler", ok: true, detail: "ECJ (javac backend disabled)" }, { name: "workspace trust", ok: config.trustWorkspace, detail: config.trustWorkspace ? "enabled" : "build import disabled" }, { name: "source encoding", ok: true, detail: config.sourceEncoding ?? "UTF-8 or Eclipse project settings" }, { name: "excluded projects", ok: true, detail: config.excludedProjects?.length ? config.excludedProjects.join(", ") : "none" }, { name: "additional test classpath", ok: true, detail: config.testClasspathEntries?.length ? config.testClasspathEntries.join(", ") : "none" }); for (const c of checks) process.stdout.write(`${c.ok ? "OK" : "FAIL"} ${c.name}: ${c.detail}\n`); return checks.every(c => c.ok || c.name === "workspace trust") ? 0 : 1; }

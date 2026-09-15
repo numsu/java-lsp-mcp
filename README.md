@@ -40,12 +40,18 @@ On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /pro
 | `java_call_hierarchy` | Callers and callees; incoming callers default to production scope |
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
 | `java_diagnostics` | Current-snapshot diagnostics |
-| `java_compile` | ECJ workspace compilation |
+| `java_compile` | ECJ workspace compilation with automatic loaded-prerequisite recovery |
 | `java_run_tests` | JUnit test execution |
 | `java_find_affected_tests` | Statically connected tests |
 | `java_find_unused_code` | Candidate unused private members |
 | `java_code_actions` | Available fixes and refactorings |
 | `java_edit_preview` | Rename, action, import, format previews |
+| `java_debug_targets` | Discover local JVMs started with the JDWP agent |
+| `java_debug_attach`, `java_debug_sessions`, `java_debug_detach` | JDWP debug-session lifecycle |
+| `java_debug_set_breakpoints`, `java_debug_wait_for_stop` | Source breakpoints and bounded stop-event waits |
+| `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Runtime thread, stack, local, and object inspection |
+| `java_debug_execute` | Continue and step over, into, or out |
+| `java_debug_hot_swap` | ECJ compilation and JDI Hot Code Replace for loaded classes |
 
 See the [tool reference](docs/tools.md) or run `java-lsp-mcp describe-tools`.
 

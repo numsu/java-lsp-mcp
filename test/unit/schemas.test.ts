@@ -47,3 +47,14 @@ test("outline containment and read-only analyses have bounded defaults", () => {
   assert.deepEqual(inputs.java_find_unused_code.parse({}).kinds, ["method", "constructor", "field"]);
   const affected = inputs.java_find_affected_tests.parse({ target: { path: "A.java", line: 1, column: 1 } }); assert.equal(affected.transitive, true); assert.equal(affected.maxDepth, 10);
 });
+test("debug tools enforce state handles and bounded waits", () => {
+  assert.deepEqual(inputs.java_debug_targets.parse({}), { includeUnavailable: false });
+  assert.equal(inputs.java_debug_attach.parse({ targetId: "local:123" }).timeoutMs, 10_000);
+  assert.equal(inputs.java_debug_variables.safeParse({ sessionId: "s", stopId: "x" }).success, false);
+  assert.equal(inputs.java_debug_variables.safeParse({ sessionId: "s", stopId: "x", frameId: "f", valueId: "v" }).success, false);
+  assert.equal(inputs.java_debug_variables.parse({ sessionId: "s", stopId: "x", frameId: "f" }).limit, 50);
+  assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into" }).success, false);
+  assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into", threadId: 1, stopId: "x" }).success, true);
+  assert.equal(inputs.java_debug_set_breakpoints.safeParse({ sessionId: "s", sourcePath: "A.java", breakpoints: [{ line: 0 }] }).success, false);
+  assert.deepEqual(inputs.java_debug_hot_swap.parse({ sessionId: "s", sourcePaths: ["src/App.java"] }), { sessionId: "s", sourcePaths: ["src/App.java"], dryRun: false });
+});

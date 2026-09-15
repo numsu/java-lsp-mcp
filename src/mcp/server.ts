@@ -4,6 +4,7 @@ import type { Config } from "../config/config.js";
 import type { Logger } from "../logging.js";
 import { JavaLspMcpError } from "../types.js";
 import type { JavaService } from "./service.js";
+import { DebugService } from "../debug/service.js";
 import { inputs, outputs, type ToolName } from "./schemas.js";
 import { application } from "../version.js";
 
@@ -16,22 +17,34 @@ export const descriptions: Record<ToolName, string> = {
   java_call_hierarchy: "Find incoming callers or outgoing callees of a method or constructor as a bounded semantic graph. Incoming hierarchies exclude test callers by default; set callerScope=tests for test callers only or callerScope=all for both.",
   java_type_hierarchy: "Find semantic supertypes, subtypes, implementations, interfaces, and permitted subclasses.",
   java_diagnostics: "Return JDT/ECJ diagnostics for the exact synchronized content. All requested paths share one deadline; status=partial identifies paths whose current-version diagnostics were not published in time. Use immediately after applying external patches.",
-  java_compile: "Run an Eclipse workspace build with ECJ in private state. Build status is authoritative; diagnosticsComplete says whether error details were published by JDT. Use before declaring a Java change complete; Maven/Gradle lifecycle tests remain separate.",
+  java_compile: "Run an Eclipse workspace build with ECJ in private state. Builds automatically build loaded prerequisite projects and retry blocked dependents. Build status is authoritative; diagnosticsComplete says whether error details were published by JDT. Use before declaring a Java change complete; Maven/Gradle lifecycle tests remain separate.",
   java_run_tests: "Run one selector with path/className/methodName or batch up to 100 selectors in tests. Batch selectors, distinct classpath groups, and concurrent calls run in parallel after sharing compilation; do not batch tests that require exclusive shared resources. Set compileProjectOnly=true to compile only selected JDT projects. Pass coverage={} to opt into JaCoCo; coverage.details=summary omits files, while files are independently paginated with coverage.limit/cursor. Prefer this for targeted unit tests; use Maven/Gradle when lifecycle plugins or integration-test setup matters.",
   java_find_affected_tests: "Find JUnit/TestNG test methods that can statically reach a target through JDT call relationships. This selects fast candidate tests; it does not prove runtime coverage.",
   java_find_unused_code: "Find private methods, constructors, and fields with no semantic references, plus optionally write-only fields. Results are candidates because reflection and frameworks may access members implicitly.",
   java_code_actions: "List JDT quick fixes/refactorings and mint short-lived handles. Does not apply changes.",
   java_edit_preview: "Calculate rename, code-action, import, or formatting edits without modifying files. Apply the preview with the normal patch tool.",
+  java_debug_targets: "Discover local Java processes that were started with the JDWP agent. This is read-only and does not attach; call java_debug_attach with a selected targetId.",
+  java_debug_attach: "Attach a JDI debug session to one selected local JDWP target. A target normally accepts only one debugger, so detach Eclipse or another debugger first.",
+  java_debug_sessions: "List debug sessions owned by this MCP server and their running, stopped, terminated, or disconnected state.",
+  java_debug_set_breakpoints: "Idempotently replace all source-line breakpoints for one workspace-relative Java source file. Unloaded classes remain pending until class preparation.",
+  java_debug_threads: "List target JVM threads and the current location of suspended threads. System JVM threads are omitted by default.",
+  java_debug_wait_for_stop: "Wait for a breakpoint or step event with a bounded timeout. A timeout is a normal outcome. Use the returned stopId for stack and variable inspection.",
+  java_debug_stack_trace: "Read a bounded stack trace for the thread suspended at the current stop. Frame handles become stale as soon as execution resumes.",
+  java_debug_variables: "Read arguments, locals, this, or lazily expand an object/array value. Handles are scoped to stopId and become stale on resume.",
+  java_debug_execute: "Continue the target or step over, into, or out on the stopped thread. Step actions require the current stopId and threadId; waitTimeoutMs can atomically await the next stop.",
+  java_debug_detach: "Detach this MCP debug session without terminating the target JVM. Any event-set suspension owned by the session is resumed first.",
+  java_debug_hot_swap: "Compile selected workspace Java sources with ECJ and redefine their loaded classes through JDI Hot Code Replace. Standard JVMs generally support method-body changes only; breakpoints are restored after replacement.",
 };
 
-export function buildMcpServer(service: JavaService, config: Config, logger: Logger): McpServer {
-  const server = new McpServer({ name: application.name, version: application.version }, { capabilities: { tools: { listChanged: false } }, instructions: "Every Java tool automatically waits on the same shared JDT semantic-readiness gate; do not use a fixed startup delay. java_status with waitForReady=true observes that gate explicitly. Use semantic tools for Java symbols and ordinary file/search/patch tools for source changes. Use java_find_affected_tests to select fast candidate tests, then batch independent selectors in java_run_tests: selected tests and concurrent calls execute in parallel after sharing compilation, so do not batch tests requiring exclusive shared resources. Set compileProjectOnly=true when compiling only the selected JDT projects is safe. Use Maven/Gradle when lifecycle plugins, code generation, packaging, integration-test setup, or full-suite assurance matters. Run diagnostics after patches and ECJ compilation before completion." });
+export function buildMcpServer(service: JavaService, config: Config, logger: Logger, debug?: DebugService): McpServer {
+  const debuggerService = debug ?? new DebugService(config, logger, service);
+  const server = new McpServer({ name: application.name, version: application.version }, { capabilities: { tools: { listChanged: false } }, instructions: "Every Java tool automatically waits on the same shared JDT semantic-readiness gate; do not use a fixed startup delay. java_status with waitForReady=true observes that gate explicitly. Use semantic tools for Java symbols and ordinary file/search/patch tools for source changes. Use java_find_affected_tests to select fast candidate tests, then batch independent selectors in java_run_tests: selected tests and concurrent calls execute in parallel after sharing compilation, so do not batch tests requiring exclusive shared resources. Set compileProjectOnly=true when compiling only the selected JDT projects is safe. Use Maven/Gradle when lifecycle plugins, code generation, packaging, integration-test setup, or full-suite assurance matters. Run diagnostics after patches and ECJ compilation before completion. For runtime debugging, discover a local JDWP target, attach one session, set breakpoints, and treat stopId/frameId/valueId handles as invalid after continue or step; detach without terminating the target when done." });
   const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   type Registration = (name: string, config: { description: string; inputSchema: object; annotations: object }, callback: (input: unknown, context: { mcpReq: { signal: AbortSignal } }) => Promise<object>) => unknown;
   const registerTool = server.registerTool.bind(server) as unknown as Registration;
   type ToolInput<N extends ToolName> = z.output<(typeof inputs)[N]>;
   const register = <N extends ToolName>(name: N, handler: (input: ToolInput<N>, signal: AbortSignal) => Promise<object> | object): void => {
-    const annotations = name === "java_compile" ? { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } : name === "java_run_tests" ? { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } : readAnnotations;
+    const annotations = name === "java_compile" || name === "java_debug_attach" || name === "java_debug_set_breakpoints" || name === "java_debug_execute" || name === "java_debug_detach" || name === "java_debug_hot_swap" ? { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } : name === "java_run_tests" ? { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } : readAnnotations;
     registerTool(name, { description: descriptions[name], inputSchema: inputs[name], annotations }, async (input, context) => {
       try {
         const parsed = inputs[name].parse(input) as ToolInput<N>;
@@ -61,6 +74,17 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   register("java_find_unused_code", (i, signal) => service.unusedCode(i, signal));
   register("java_code_actions", i => service.codeActions(i));
   register("java_edit_preview", i => service.editPreview(i));
+  register("java_debug_targets", i => debuggerService.targets(i));
+  register("java_debug_attach", i => debuggerService.attach(i));
+  register("java_debug_sessions", () => debuggerService.sessions());
+  register("java_debug_set_breakpoints", i => debuggerService.setBreakpoints(i));
+  register("java_debug_threads", i => debuggerService.threads(i));
+  register("java_debug_wait_for_stop", i => debuggerService.wait(i));
+  register("java_debug_stack_trace", i => debuggerService.stack(i));
+  register("java_debug_variables", i => debuggerService.variables(i));
+  register("java_debug_execute", i => debuggerService.execute(i));
+  register("java_debug_detach", i => debuggerService.detach(i));
+  register("java_debug_hot_swap", (i, signal) => debuggerService.hotSwap(i, signal));
   return server;
 }
 
