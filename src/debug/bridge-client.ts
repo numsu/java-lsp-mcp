@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../config/config.js";
 import type { Logger } from "../logging.js";
-import { JavaLspMcpError } from "../types.js";
+import { JavaLspMcpError, type Json } from "../types.js";
 
 type Pending = { resolve(value: Record<string, unknown>): void; reject(error: Error): void; timer: NodeJS.Timeout };
 
@@ -63,7 +63,7 @@ export class DebugBridgeClient {
     try { value = JSON.parse(decode(payload)) as Record<string, unknown>; }
     catch { pending.reject(new JavaLspMcpError("DEBUG_PROTOCOL_ERROR", "Debug bridge returned malformed data")); return; }
     if (status === "OK") pending.resolve(value);
-    else pending.reject(new JavaLspMcpError(String(value.code ?? "DEBUG_ERROR"), String(value.message ?? "Debug operation failed")));
+    else pending.reject(new JavaLspMcpError(String(value.code ?? "DEBUG_ERROR"), String(value.message ?? "Debug operation failed"), value.details as Json | undefined));
   }
 }
 

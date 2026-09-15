@@ -49,9 +49,9 @@ On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /pro
 | `java_debug_targets` | Discover local JVMs started with the JDWP agent |
 | `java_debug_attach`, `java_debug_sessions`, `java_debug_detach` | JDWP debug-session lifecycle |
 | `java_debug_set_breakpoints`, `java_debug_wait_for_stop` | Source breakpoints and bounded stop-event waits |
-| `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Runtime thread, stack, local, and object inspection |
+| `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Filtered runtime thread/stack, local, collection, and object inspection |
 | `java_debug_execute` | Continue and step over, into, or out |
-| `java_debug_hot_swap` | ECJ compilation and JDI Hot Code Replace for loaded classes |
+| `java_debug_hot_swap` | ECJ/JDI Hot Code Replace with change and active-frame reporting |
 
 See the [tool reference](docs/tools.md) or run `java-lsp-mcp describe-tools`.
 

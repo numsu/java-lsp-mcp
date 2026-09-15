@@ -58,8 +58,14 @@ test("debug tools enforce state handles and bounded waits", () => {
   assert.equal(inputs.java_debug_variables.parse({ sessionId: "s", stopId: "x", frameId: "f" }).limit, 50);
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into" }).success, false);
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into", threadId: 1, stopId: "x" }).success, true);
+  assert.deepEqual(inputs.java_debug_threads.parse({ sessionId: "s" }), { sessionId: "s", includeSystemThreads: false });
+  assert.deepEqual(inputs.java_debug_stack_trace.parse({ sessionId: "s", stopId: "x", threadId: 1 }), { sessionId: "s", stopId: "x", threadId: 1, startFrame: 0, maxFrames: 20, includeInfrastructure: false });
+  const variables = inputs.java_debug_variables.parse({ sessionId: "s", stopId: "x", frameId: "f" });
+  assert.equal(variables.inlineFields, false); assert.equal(variables.maxInlineFields, 10); assert.equal(variables.includeGetters, false);
   assert.equal(inputs.java_debug_set_breakpoints.safeParse({ sessionId: "s", sourcePath: "A.java", breakpoints: [{ line: 0 }] }).success, false);
   assert.equal(inputs.java_debug_set_breakpoints.parse({ sessionId: "s", sourcePath: "A.java", breakpoints: [] }).timeoutMs, 5_000);
   assert.equal(inputs.java_debug_set_breakpoints.safeParse({ sessionId: "s", sourcePath: "A.java", breakpoints: [], timeoutMs: 60_001 }).success, false);
   assert.deepEqual(inputs.java_debug_hot_swap.parse({ sessionId: "s", sourcePaths: ["src/App.java"] }), { sessionId: "s", sourcePaths: ["src/App.java"], dryRun: false });
+  assert.equal(outputs.java_debug_wait_for_stop.parse({ outcome: "timeout", sessionId: "s", targetId: "local:1", state: "stopped", stopId: "stop:1" }).stopId, "stop:1");
+  assert.equal(outputs.java_debug_hot_swap.parse({ outcome: "applied", classes: [{ className: "p.App", status: "applied", changeType: "method_body" }], diagnostics: [], breakpoints: { restored: [], pending: [], rejected: [] }, activeFrames: [{ threadId: 1, className: "p.App", methodName: "run", obsolete: false, impact: "continues_old_bytecode" }] }).classes[0]?.changeType, "method_body");
 });
