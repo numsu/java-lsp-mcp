@@ -1,0 +1,33 @@
+{
+  "name": "java-lsp-mcp",
+  "version": "0.1.1",
+  "description": "Java semantic intelligence MCP server backed by Eclipse JDT LS and ECJ",
+  "type": "module",
+  "packageManager": "npm@11.6.0",
+  "bin": { "java-lsp-mcp": "bin/java-lsp-mcp.js" },
+  "exports": "./dist/server.mjs",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "test": "node --test --import tsx test/unit/**/*.test.ts test/protocol/**/*.test.ts",
+    "test:integration": "node --test --import tsx test/integration/**/*.test.ts",
+    "check": "npm run build && npm test",
+    "fetch-runtime": "node scripts/fetch-runtime.mjs",
+    "build-release": "node scripts/build-release.mjs",
+    "smoke-release": "node scripts/smoke-release.mjs",
+    "generate-sbom": "node scripts/generate-sbom.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "chokidar": "4.0.3",
+    "diff": "8.0.2",
+    "vscode-jsonrpc": "8.2.1",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "esbuild": "0.25.9",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  }
+}

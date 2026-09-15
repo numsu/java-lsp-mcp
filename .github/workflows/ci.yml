@@ -1,0 +1,56 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm run generate-sbom
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 25 }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run fetch-runtime -- --platform linux-x64
+      - run: npm run test:integration
+        env: { JAVA_LSP_MCP_INTEGRATION: "1" }
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-x64, windows-arm64, macos-x64, macos-arm64, linux-x64, linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build-release -- --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "java-lsp-mcp-${{ matrix.platform }}", path: "artifacts/java-lsp-mcp-${{ matrix.platform }}*" }
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci && npm run build
+      - name: Start test-only Streamable HTTP adapter
+        run: node --import tsx test/protocol/http-harness.ts & echo $! > /tmp/java-lsp-mcp-harness.pid
+      - name: Run applicable pinned official MCP 2026-07-28 scenarios
+        run: |
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.11 server --url http://127.0.0.1:3219/mcp --scenario tools-list --spec-version 2026-07-28
+          npx -y @modelcontextprotocol/conformance@0.2.0-alpha.11 server --url http://127.0.0.1:3219/mcp --scenario http-header-validation --spec-version 2026-07-28
+      - if: always()
+        run: kill $(cat /tmp/java-lsp-mcp-harness.pid) || true
