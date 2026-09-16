@@ -77,7 +77,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes-file release-notes.md \
-            --verify-slots \
             release-assets/java-lsp-mcp-*/java-lsp-mcp-*.zip \
             release-assets/java-lsp-mcp-*/java-lsp-mcp-*.tar.gz \
             artifacts/sbom.cdx.json
