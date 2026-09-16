@@ -19,7 +19,7 @@ await cp("dist/runtime/debug", join(bundle, "runtime", "debug"), { recursive: tr
 await cp("third_party/notices/THIRD_PARTY_NOTICES.md", join(bundle, "licenses", "THIRD_PARTY_NOTICES.md"));
 await cp("README.md", join(bundle, "README.txt"));
 await cp("runtime/versions.lock.json", join(bundle, "manifest.json"));
-await writeFile(join(bundle, "bin", "java-lsp-mcp"), '#!/bin/sh\nD="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\nexec "$D/runtime/node/bin/node" "$D/app/server.mjs" "$@"\n');
+await writeFile(join(bundle, "bin", "java-lsp-mcp"), '#!/bin/sh\nd="$0"\ncase $d in */*) d=${d%/*};; esac\nD="$(CDPATH= cd -- "$d/.." && pwd)"\nexec "$D/runtime/node/bin/node" "$D/app/server.mjs" "$@"\n');
 await chmod(join(bundle, "bin", "java-lsp-mcp"), 0o755);
 await writeFile(join(bundle, "bin", "java-lsp-mcp.cmd"), '@echo off\r\nset "D=%~dp0.."\r\n"%D%\\runtime\\node\\node.exe" "%D%\\app\\server.mjs" %*\r\n');
 
@@ -27,8 +27,13 @@ const windows = platform.startsWith("windows-");
 const finalArchive = `${finalRoot}${windows ? ".zip" : ".tar.gz"}`;
 const stagedArchive = `${finalRoot}.tmp${windows ? ".zip" : ".tar.gz"}`;
 await rm(stagedArchive, { force: true });
-if (windows) execFileSync("tar", ["-a", "-cf", stagedArchive, "-C", stageRoot, "java-lsp-mcp"]);
-else execFileSync("tar", ["-czf", stagedArchive, "-C", stageRoot, "java-lsp-mcp"]);
+if (windows) {
+  // GNU tar cannot write zip archives (it silently emits a plain tar), so only
+  // use tar when it is bsdtar; prefer the zip CLI, which both write and verify.
+  if (commandSucceeds("zip", ["-v"])) execFileSync("zip", ["-q", "-r", "-X", stagedArchive, "java-lsp-mcp"], { cwd: stageRoot, stdio: "inherit" });
+  else if (isBsdTar()) execFileSync("tar", ["-a", "-cf", stagedArchive, "-C", stageRoot, "java-lsp-mcp"], { stdio: "inherit" });
+  else throw new Error("Creating the Windows zip requires the zip command or bsdtar; GNU tar cannot write zip archives");
+} else execFileSync("tar", ["-czf", stagedArchive, "-C", stageRoot, "java-lsp-mcp"], { stdio: "inherit" });
 await rm(finalArchive, { force: true });
 await rename(stagedArchive, finalArchive);
 
@@ -56,4 +61,10 @@ try {
 
 async function exists(path) {
   try { await access(path); return true; } catch { return false; }
+}
+function commandSucceeds(command, args) {
+  try { execFileSync(command, args, { stdio: "ignore" }); return true; } catch { return false; }
+}
+function isBsdTar() {
+  try { return execFileSync("tar", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).startsWith("bsdtar"); } catch { return false; }
 }

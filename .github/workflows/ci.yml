@@ -37,8 +37,12 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run build-release -- --platform ${{ matrix.platform }}
+      # Upload only the release archive, not the extracted stable directory, so
+      # the downloaded artifact does not contain the bundle twice.
       - uses: actions/upload-artifact@v4
-        with: { name: "java-lsp-mcp-${{ matrix.platform }}", path: "artifacts/java-lsp-mcp-${{ matrix.platform }}*" }
+        with:
+          name: "java-lsp-mcp-${{ matrix.platform }}"
+          path: "artifacts/java-lsp-mcp-${{ matrix.platform }}.${{ startsWith(matrix.platform, 'windows') && 'zip' || 'tar.gz' }}"
   conformance:
     runs-on: ubuntu-latest
     steps:

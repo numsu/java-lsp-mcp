@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Verify the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-x64, windows-arm64, macos-x64, macos-arm64, linux-x64, linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build-release -- --platform ${{ matrix.platform }}
+      # Upload only the release archive, not the extracted stable directory, so
+      # the downloaded artifact does not contain the bundle twice.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: "java-lsp-mcp-${{ matrix.platform }}"
+          path: "artifacts/java-lsp-mcp-${{ matrix.platform }}.${{ startsWith(matrix.platform, 'windows') && 'zip' || 'tar.gz' }}"
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm run generate-sbom
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::error::Release $GITHUB_REF_NAME already exists; delete it before re-publishing"
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const lock = JSON.parse(fs.readFileSync("runtime/versions.lock.json", "utf8"));
+            const lines = [
+              "Java semantic intelligence for MCP clients, powered by Eclipse JDT Language Server and ECJ.",
+              "",
+              "Bundled runtimes:",
+              ...Object.entries(lock.components).map(([name, component]) => `- ${name} ${component.version}`),
+              "",
+              "Archive names are versionless so editor configuration never changes. Verify an archive on a matching platform with `npm run smoke-release -- --bundle <archive>`; SHA-256 URLs and hashes are in `manifest.json` inside each archive.",
+            ];
+            fs.writeFileSync("release-notes.md", lines.join("\n") + "\n");
+          '
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-slots \
+            release-assets/java-lsp-mcp-*/java-lsp-mcp-*.zip \
+            release-assets/java-lsp-mcp-*/java-lsp-mcp-*.tar.gz \
+            artifacts/sbom.cdx.json
