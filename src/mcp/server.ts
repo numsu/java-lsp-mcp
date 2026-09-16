@@ -27,7 +27,7 @@ export const descriptions: Record<ToolName, string> = {
   java_debug_attach: "Attach a JDI debug session to one selected local JDWP target. A target normally accepts only one debugger, so detach Eclipse or another debugger first.",
   java_debug_sessions: "List debug sessions owned by this MCP server and their running, stopped, terminated, or disconnected state.",
   java_debug_set_breakpoints: "Idempotently replace all source-line breakpoints for one workspace-relative Java source file. Unloaded classes remain pending until class preparation.",
-  java_debug_threads: "List target JVM threads and the current location of suspended threads. System/infrastructure threads are omitted by default; packagePrefix and namePattern narrow the list.",
+  java_debug_threads: "List target JVM threads and the current location of suspended threads. System/infrastructure threads are omitted by default; packagePrefix matches the suspended thread's declaring class and namePattern is a full-match Java regular expression (an invalid pattern returns INVALID_PATTERN).",
   java_debug_wait_for_stop: "Wait for a breakpoint or step event with a bounded timeout. A timeout is a normal outcome. Use the returned stopId for stack and variable inspection.",
   java_debug_stack_trace: "Read a paginated stack trace for the thread suspended at the current stop. Application frames are returned by default; use packagePrefix or includeInfrastructure to control filtering. Frame handles become stale as soon as execution resumes.",
   java_debug_variables: "Read arguments, locals, this, or lazily expand an object/array value. inlineFields shows important object fields; includeGetters is an explicit opt-in. Handles are scoped to stopId and become stale on resume.",

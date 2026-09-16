@@ -221,12 +221,12 @@ export class JavaService {
     if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
     const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]); if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`);
     if (input.compile !== "none") await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs);
-    const runtime = resolveTestRuntime(this.config);
     const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
       const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName); const classpath = await this.client.testClasspaths(snapshot.uri, input.timeoutMs); const additional = resolveTestClasspathEntries(this.config.testClasspathEntries ?? [], classpath.projectRoot, this.paths.root); const classpaths = [...new Set([...(classpath.classpaths ?? []), ...(classpath.modulepaths ?? []), ...additional])]; if (!classpaths.length) throw new JavaLspMcpError("TEST_CLASSPATH_EMPTY", `JDT returned no test runtime classpath for ${snapshot.path}`); const cwd = input.workingDirectory ? this.paths.resolve(input.workingDirectory) : nearestProjectDirectory(dirname(this.paths.resolve(snapshot.path)), this.paths.root); return { key: `${cwd}\0${classpaths.join("\0")}`, cwd, classpaths, selector: { className, ...(selector.methodName && { methodName: selector.methodName }), sourcePath: snapshot.path } };
     }));
     const groups = new Map<string, { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }>();
     for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+    const runtime = resolveTestRuntime(this.config);
     return [...groups.values()].map(group => ({ java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: [...input.vmArgs, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"], systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: false, includeStackTrace: false, outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groups.size * 3)))) }));
   }
   private async calculateTestRun(input: TestInput, signal?: AbortSignal): Promise<object> {
@@ -251,7 +251,6 @@ export class JavaService {
         catch (error) { return { status: "compile-failed", durationMs: Date.now() - started, counts: {}, failures: [], message: error instanceof Error ? error.message : String(error) }; }
       }
       if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
-      const runtime = resolveTestRuntime(this.config);
       const coverageRuntime = input.coverage?.enabled ? resolveCoverageRuntime() : undefined;
       const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
         const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName);
@@ -262,6 +261,7 @@ export class JavaService {
       }));
       const groups = new Map<string, { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }>();
       for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+      const runtime = resolveTestRuntime(this.config);
       const runs = await Promise.all([...groups.values()].map(group => runJUnit({ java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: input.vmArgs, systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: input.includeOutput, includeStackTrace: input.includeStackTrace, ...(coverageRuntime && { coverage: { agent: coverageRuntime.agent, includes: input.coverage?.includes ?? [] } }), ...(signal && { signal }), outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groups.size * 3)))) })));
       const coverage = coverageRuntime ? await createCoverageReport({ java: runtime.java, cli: coverageRuntime.cli, executionData: runs.flatMap(item => item.coverageData ? [item.coverageData] : []), classpaths: launches.flatMap(item => item.classpaths), sourceFiles: workspaceJavaFiles(this.paths.root).filter(isProductionJavaPath), cwd: this.paths.root, timeoutMs: input.timeoutMs, ...(signal && { signal }) }) : undefined;
       run = { ...mergeJunitRuns(runs, Date.now() - started), ...(coverage && { coverage }) };

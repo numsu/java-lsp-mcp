@@ -11,6 +11,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 class DebugBridge {
   static final Base64.Decoder DECODER = Base64.getUrlDecoder();
@@ -81,7 +83,7 @@ class DebugBridge {
     final String id, targetId; final long pid; final VirtualMachine vm; final Instant attachedAt = Instant.now(); final BlockingQueue<Stop> stops = new LinkedBlockingQueue<>(); final AtomicLong stopSequence = new AtomicLong(); final CountDownLatch startupReady = new CountDownLatch(1); volatile EventSet startupSuspension; volatile String pendingAction; volatile long pendingThreadId; volatile Instant pendingSince;
     final Map<String, Value> values = new ConcurrentHashMap<>(); final List<LogicalBreakpoint> breakpoints = new CopyOnWriteArrayList<>(); volatile Stop current; volatile String state = "running"; volatile boolean closed;
     Session(String id, String targetId, long pid, VirtualMachine vm) { this.id = id; this.targetId = targetId; this.pid = pid; this.vm = vm; }
-    void start() { ClassPrepareRequest request = vm.eventRequestManager().createClassPrepareRequest(); request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD); request.enable(); Thread.ofPlatform().daemon().name("jdi-events-" + pid).start(this::events); try { startupReady.await(1, TimeUnit.SECONDS); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); } }
+    void start() { ClassPrepareRequest request = vm.eventRequestManager().createClassPrepareRequest(); request.setSuspendPolicy(EventRequest.SUSPEND_EVENT_THREAD); request.enable(); daemonThread("jdi-events-" + pid, this::events).start(); try { startupReady.await(1, TimeUnit.SECONDS); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); } }
     String info() { String capabilities = obj("canRedefineClasses", capability(() -> vm.canRedefineClasses()), "canPopFrames", capability(() -> vm.canPopFrames()), "canGetBytecodes", capability(() -> vm.canGetBytecodes()), "canGetSyntheticAttribute", capability(() -> vm.canGetSyntheticAttribute()), "canWatchFieldAccess", capability(() -> vm.canWatchFieldAccess()), "canWatchFieldModification", capability(() -> vm.canWatchFieldModification())); return obj("session", raw(obj("sessionId", id, "targetId", targetId, "pid", pid, "vmName", safeVmName(), "vmVersion", safeVmVersion(), "state", state, "attachedAt", attachedAt.toString(), "activeThreadId", activeThreadId(), "stopId", current == null ? null : current.id, "attachRequired", false, "capabilities", raw(capabilities)))); }
     Long activeThreadId() { try { for (ThreadReference thread : vm.allThreads()) try { if (thread.isSuspended()) return thread.uniqueID(); } catch (Exception ignored) {} } catch (Exception ignored) {} return null; }
     String safeVmName() { try { return vm.name(); } catch (Exception e) { return "unknown"; } }
@@ -108,7 +110,7 @@ class DebugBridge {
           current = null; values.clear(); state = "running"; if (action.equals("continue")) { pendingAction = action; pendingThreadId = 0; pendingSince = Instant.now(); }
         }
       }
-      if (startup != null) startup.resume(); else stop.set.resume();
+      try { if (startup != null) startup.resume(); else stop.set.resume(); } catch (Throwable error) { clearPending(); throw error; }
       if (wait > 0) return waitForStop(wait); return context(obj("outcome", "running", "activeRequest", pendingAction == null ? null : raw(requestInfo())));
     }
     synchronized String breakpoints(String sourcePath, String linesText, int timeout) throws InterruptedException {
@@ -121,7 +123,7 @@ class DebugBridge {
     }
     void installPending(ReferenceType type) { for (LogicalBreakpoint bp : breakpoints) if (bp.requests.isEmpty()) bp.install(vm, type); }
     String logicalId(BreakpointRequest request) { for (LogicalBreakpoint bp : breakpoints) if (bp.requests.contains(request)) return bp.id; return null; }
-    String threads(boolean includeSystem, String packagePrefix, String namePattern) { List<String> result = new ArrayList<>(); for (ThreadReference thread : vm.allThreads()) { String name = thread.name(); if (!includeSystem && isSystemThread(name)) continue; if (!namePattern.isBlank() && !name.matches(namePattern)) continue; Location location = null; String className = ""; try { if (thread.isSuspended() && !thread.frames().isEmpty()) { location = thread.frame(0).location(); className = location.declaringType().name(); } } catch (Exception ignored) {} if (!packagePrefix.isBlank() && !className.isBlank() && !className.startsWith(packagePrefix)) continue; result.add(obj("threadId", thread.uniqueID(), "name", name, "status", threadStatus(thread.status()), "suspended", thread.isSuspended(), "location", location == null ? null : raw(location(location)))); } return context(obj("threads", raw(array(result)))); }
+    String threads(boolean includeSystem, String packagePrefix, String namePattern) { Pattern pattern; try { pattern = namePattern.isBlank() ? null : Pattern.compile(namePattern); } catch (PatternSyntaxException e) { throw new DebugFailure("INVALID_PATTERN", "Invalid thread name pattern: " + namePattern); } List<String> result = new ArrayList<>(); for (ThreadReference thread : vm.allThreads()) { String name = thread.name(); if (!includeSystem && isSystemThread(name)) continue; if (pattern != null && !pattern.matcher(name).matches()) continue; Location location = null; String className = ""; try { if (thread.isSuspended() && !thread.frames().isEmpty()) { location = thread.frame(0).location(); className = location.declaringType().name(); } } catch (Exception ignored) {} if (!packagePrefix.isBlank() && !className.isBlank() && !className.startsWith(packagePrefix)) continue; result.add(obj("threadId", thread.uniqueID(), "name", name, "status", threadStatus(thread.status()), "suspended", thread.isSuspended(), "location", location == null ? null : raw(location(location)))); } return context(obj("threads", raw(array(result)))); }
     String stack(String stopId, long threadId, int start, int max, String packagePrefix, boolean includeInfrastructure) throws Exception { Stop stop = requireStop(stopId); if (stop.thread.uniqueID() != threadId) throw new DebugFailure("THREAD_NOT_SUSPENDED", "Thread is not the current stopped thread"); List<StackFrame> frames = stop.thread.frames(); List<Integer> selected = new ArrayList<>(); for (int i = 0; i < frames.size(); i++) { String name = frames.get(i).location().declaringType().name(); if ((includeInfrastructure || !isInfrastructure(name)) && (packagePrefix.isBlank() || name.startsWith(packagePrefix))) selected.add(i); } List<String> result = new ArrayList<>(); for (int i = start; i < Math.min(selected.size(), start + max); i++) { int original = selected.get(i); Location l = frames.get(original).location(); result.add(obj("frameId", stopId + ":" + threadId + ":" + original, "index", i, "className", l.declaringType().name(), "methodName", l.method().name(), "methodSignature", l.method().signature(), "sourcePath", source(l), "line", positive(l.lineNumber()), "native", l.method().isNative())); } return context(obj("stopId", stopId, "totalFrames", selected.size(), "frames", raw(array(result)), "truncated", start + max < selected.size(), "nextStartFrame", start + max < selected.size() ? start + max : null)); }
     String variables(String stopId, String frameId, String valueId, String scope, int start, int limit, boolean inlineFields, int maxInlineFields, boolean includeGetters) throws Exception {
       Stop stop = requireStop(stopId); List<NamedValue> found = new ArrayList<>();
@@ -162,7 +164,7 @@ class DebugBridge {
   record Probe(String arguments, boolean known) {}
   static Probe probeJvmArguments(long pid) {
     AtomicReference<Probe> result = new AtomicReference<>(new Probe("", false));
-    Thread probe = Thread.ofPlatform().daemon().name("attach-probe-" + pid).start(() -> {
+    Thread probe = daemonThread("attach-probe-" + pid, () -> {
       com.sun.tools.attach.VirtualMachine attached = null;
       try { attached = com.sun.tools.attach.VirtualMachine.attach(String.valueOf(pid)); Properties properties = attached.getAgentProperties(); result.set(new Probe(properties.getProperty("sun.jvm.args", ""), true)); }
       catch (Throwable ignored) { }
@@ -200,6 +202,7 @@ class DebugBridge {
   static String display(Value v) { if (v == null) return "null"; if (v instanceof StringReference s) { String x=s.value(); return x.length()>1000 ? x.substring(0,1000)+"…" : x; } if (v instanceof PrimitiveValue) return v.toString(); if (v instanceof ArrayReference a) return a.type().name()+"["+a.length()+"]"; if (v instanceof ObjectReference o) return o.referenceType().name()+"@"+Long.toHexString(o.uniqueID()); return v.toString(); }
   static String code(Throwable e) { if (e instanceof DebugFailure d) return d.code; if (e instanceof VMDisconnectedException) return "SESSION_DISCONNECTED"; if (e instanceof UnsupportedOperationException) return "UNSUPPORTED_CAPABILITY"; if (e instanceof ClassFormatError || e instanceof VerifyError || e instanceof UnsupportedClassVersionError) return "REDEFINE_FAILED"; return "DEBUG_ERROR"; }
   static String message(Throwable e) { return e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(); }
+  static Thread daemonThread(String name, Runnable task) { Thread thread = new Thread(task, name); thread.setDaemon(true); return thread; }
   static synchronized void reply(String id, String status, String json) { System.out.println(id + "\t" + status + "\t" + ENCODER.encodeToString(json.getBytes(StandardCharsets.UTF_8))); System.out.flush(); }
   static String decode(String text) { return new String(DECODER.decode(text), StandardCharsets.UTF_8); }
   static String token(String prefix) { return prefix + ":" + Long.toUnsignedString(IDS.incrementAndGet(), 36); }

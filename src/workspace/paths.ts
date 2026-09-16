@@ -18,7 +18,7 @@ export class WorkspacePaths {
   }
   fromUri(uri: string): { path: string; origin: "workspace" | "dependency"; editable: boolean } {
     if (!uri.startsWith("file:")) return { path: dependencyPath(uri), origin: "dependency", editable: false };
-    const file = fileURLToPath(uri);
+    const file = this.realExistingParent(fileURLToPath(uri));
     if (!this.contains(file)) return { path: dependencyPath(uri), origin: "dependency", editable: false };
     return { path: this.relative(file), origin: "workspace", editable: true };
   }
