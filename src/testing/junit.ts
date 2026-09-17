@@ -79,9 +79,9 @@ export async function launchJUnit(options: JunitRunOptions): Promise<JunitDebugL
     const argumentFile = await writeJUnitArgumentFile(options, reports);
     const child = spawn(options.java, [`@${argumentFile}`], { cwd: options.cwd, env: process.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     child.stdout.resume(); child.stderr.resume();
-    child.once("exit", () => { void rm(reports, { recursive: true, force: true }); });
-    child.once("error", () => { void rm(reports, { recursive: true, force: true }); });
-    if (child.pid === undefined) { await rm(reports, { recursive: true, force: true }); throw new Error("JUnit debug process did not expose a PID"); }
+    const cleanup = (): void => { void rm(reports, { recursive: true, force: true }); };
+    child.once("exit", cleanup); child.once("error", cleanup);
+    if (child.pid === undefined) throw new Error("JUnit debug process did not expose a PID");
     return { pid: child.pid, reports, child };
   } catch (error) { await rm(reports, { recursive: true, force: true }); throw error; }
 }

@@ -31,6 +31,8 @@ export interface TestSelectorInput { path: string; className?: string | undefine
 interface CoverageInput { enabled: boolean; includes: string[]; details: "summary" | "files"; limit: number; includeTotal: boolean; cursor?: string | undefined }
 export interface TestInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined; tests?: TestSelectorInput[] | undefined; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; debug?: boolean | undefined; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface CachedTestRun extends JunitRunResult { coverage?: CoverageReport }
+interface PreparedTest { selector: TestSelectorInput; snapshot: Snapshot }
+interface TestLaunchGroup { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }
 interface AffectedTestsInput { target: SymbolTarget; transitive: boolean; maxDepth: number; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface UnusedCodeInput { path?: string | undefined; kinds: ("method" | "constructor" | "field")[]; includeWriteOnly: boolean; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface AnalysisResult { items: object[]; complete: boolean; message?: string | undefined }
@@ -84,7 +86,7 @@ export class JavaService {
     for (const symbol of raw) visit(symbol, 0);
     const query = { tool: "outline", ...queryOf(input), path: snap.path, hash: snap.hash };
     const page = this.paginate(values, input.limit, input.cursor, query, symbols => ({ symbols }));
-    return { symbols: page.items, ...(input.includeTotal && { total: values.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }) };
+    return { ...paged(page, "symbols", input.includeTotal, values.length) };
   }
   async search(input: { query: string; kinds?: string[] | undefined; scope: string; mode: string; includeImplementation: boolean; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
     await this.prepare(); const raw = await this.client.symbols(jdtSymbolQuery(input.query, input.mode), this.config.timeoutMs);
@@ -112,7 +114,7 @@ export class JavaService {
     const query = { tool: "search", ...queryOf(input) };
     const page = this.paginate(values, input.limit, input.cursor, query, symbols => ({ symbols }));
     const pageKeys = new Set(page.items.map(searchResultKey)); const warnings = [...candidates.filter(candidate => pageKeys.has(searchResultKey(candidate.value))).flatMap(candidate => candidate.warning ? [candidate.warning] : []), ...implementationWarnings];
-    return { symbols: page.items, ...(input.includeTotal && { total: values.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(warnings.length && { warnings: uniqueWarnings(warnings) }) };
+    return { ...paged(page, "symbols", input.includeTotal, values.length), ...(warnings.length && { warnings: uniqueWarnings(warnings) }) };
   }
   async definition(input: { target: SymbolTarget; expand: ("context" | "body" | "members")[]; contextLines: number; maxSourceCharacters: number; includeDocumentation: boolean; maxDocumentationCharacters: number; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
     let uri: string, position: LspPosition, hash: string | undefined;
@@ -125,7 +127,7 @@ export class JavaService {
     const definitions = await Promise.all(locations.map(location => this.definitionResult(location, input))); const query = { tool: "definition", ...queryOf(input), ...(hash && { hash }) }; const page = this.paginate(definitions, input.limit, input.cursor, query, selected => ({ definitions: selected }));
     let documentation: string | undefined;
     if (input.includeDocumentation) documentation = hoverText(await this.client.hover(uri, position, this.config.timeoutMs)).trim().slice(0, input.maxDocumentationCharacters);
-    return { definitions: page.items, ...(input.includeTotal && { total: definitions.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(documentation && { documentation }) };
+    return { ...paged(page, "definitions", input.includeTotal, definitions.length), ...(documentation && { documentation }) };
   }
   async references(input: { target: SymbolTarget; includeDeclaration: boolean; scope: string; usageKinds?: ("call" | "read" | "write")[] | undefined; within?: SymbolTarget | undefined; includeEnclosing: boolean; includeText: boolean; contextLines: number; maxSnippetCharacters: number; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
     const target = await this.resolveTarget(input.target); let raw = await this.client.references(target.snapshot.uri, target.position, input.includeDeclaration, this.config.timeoutMs);
@@ -197,7 +199,7 @@ export class JavaService {
     if (!compilation) {
       const start = Date.now(); const deadline = operationalDeadline(input.timeoutMs); const buildFailures: string[] = []; let buildStatus = -1, excludedRoots: string[] = []; this.successfulTestCompilations.clear(); const diagnosticsEpoch = this.client.diagnostics.currentEpoch();
       try { const build = await this.enqueueBuild(() => this.configuredBuild(input.kind === "clean", remaining(deadline))); buildStatus = build.status; excludedRoots = build.excludedRoots; } catch (error) { buildFailures.push(String(error)); }
-      if (buildStatus === 2 && Date.now() < deadline) await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      await this.settleDiagnostics(buildStatus, diagnosticsEpoch, deadline);
       const entries = this.client.diagnostics.all().filter(set => !excludedRoots.some(root => fileUriWithin(set.uri, root))).flatMap(set => set.diagnostics.filter(d => severityRank(d) <= severityNameRank(input.minimumSeverity)).map(diagnostic => ({ uri: set.uri, diagnostic })));
       const status = buildStatusName(buildStatus); const success = status === "succeeded"; const diagnosticsComplete = status === "succeeded" || status === "with-errors" && entries.some(entry => entry.diagnostic.severity === 1);
       if (success) this.successfulTestCompilations.set("workspace", { generation: this.sync.indexGeneration, clean: input.kind === "clean" });
@@ -214,27 +216,14 @@ export class JavaService {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
     if (input.coverage) throw new JavaLspMcpError("DEBUG_COVERAGE_UNSUPPORTED", "Coverage is not supported for a suspended debug test launch; run the test normally with coverage after debugging");
     if (input.vmArgs.some(value => value.includes("jdwp") || value.includes("agentlib:jdwp"))) throw new JavaLspMcpError("DEBUG_VM_ARG_CONFLICT", "Do not pass JDWP arguments in vmArgs when debug=true; the server supplies suspend=y and a local ephemeral debug address");
-    if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
-    const requested = input.tests ?? [{ path: input.path!, ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
-    const prepared = await Promise.all(requested.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path) })));
-    const configuredExclusions = this.excludedProjectRoots(); if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`);
-    if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
-    const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]); if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`);
+    const prepared = await this.prepareTestSelectors(input, signal, true);
     if (input.compile !== "none") await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs);
-    const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
-      const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName); const classpath = await this.client.testClasspaths(snapshot.uri, input.timeoutMs); const additional = resolveTestClasspathEntries(this.config.testClasspathEntries ?? [], classpath.projectRoot, this.paths.root); const classpaths = [...new Set([...(classpath.classpaths ?? []), ...(classpath.modulepaths ?? []), ...additional])]; if (!classpaths.length) throw new JavaLspMcpError("TEST_CLASSPATH_EMPTY", `JDT returned no test runtime classpath for ${snapshot.path}`); const cwd = input.workingDirectory ? this.paths.resolve(input.workingDirectory) : nearestProjectDirectory(dirname(this.paths.resolve(snapshot.path)), this.paths.root); return { key: `${cwd}\0${classpaths.join("\0")}`, cwd, classpaths, selector: { className, ...(selector.methodName && { methodName: selector.methodName }), sourcePath: snapshot.path } };
-    }));
-    const groups = new Map<string, { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }>();
-    for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+    const groups = await this.testGroups(prepared, input);
     const runtime = resolveTestRuntime(this.config);
-    return [...groups.values()].map(group => ({ java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: [...input.vmArgs, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"], systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: false, includeStackTrace: false, outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groups.size * 3)))) }));
+    return [...groups.values()].map(group => this.testRunOptions(group, runtime, input, groups.size, undefined, true));
   }
   private async calculateTestRun(input: TestInput, signal?: AbortSignal): Promise<object> {
-    if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
-    if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
-    const requested = input.tests ?? [{ path: input.path!, ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
-    const prepared = await Promise.all(requested.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path) })));
-    const configuredExclusions = this.excludedProjectRoots(); if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`); if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
+    const prepared = await this.prepareTestSelectors(input, signal, !input.cursor && !input.coverage?.cursor);
     const query = { tool: "runTests", ...testQueryOf(input), hashes: prepared.map(item => [item.snapshot.path, item.snapshot.hash]) };
     const fp = fingerprint(query);
     let run: CachedTestRun;
@@ -243,8 +232,6 @@ export class JavaService {
       if (!cached) throw new JavaLspMcpError("STALE_TEST_RUN", "The paged test result expired or the workspace changed; rerun without a cursor");
       run = cached;
     } else {
-      const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]);
-      if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`);
       const started = Date.now();
       if (input.compile !== "none") {
         try { await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs); }
@@ -252,18 +239,10 @@ export class JavaService {
       }
       if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
       const coverageRuntime = input.coverage?.enabled ? resolveCoverageRuntime() : undefined;
-      const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
-        const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName);
-        const classpath = await this.client.testClasspaths(snapshot.uri, input.timeoutMs); const additional = resolveTestClasspathEntries(this.config.testClasspathEntries ?? [], classpath.projectRoot, this.paths.root); const classpaths = [...new Set([...(classpath.classpaths ?? []), ...(classpath.modulepaths ?? []), ...additional])];
-        if (!classpaths.length) throw new JavaLspMcpError("TEST_CLASSPATH_EMPTY", `JDT returned no test runtime classpath for ${snapshot.path}`);
-        const cwd = input.workingDirectory ? this.paths.resolve(input.workingDirectory) : nearestProjectDirectory(dirname(this.paths.resolve(snapshot.path)), this.paths.root);
-        return { key: `${cwd}\0${classpaths.join("\0")}`, cwd, classpaths, selector: { className, ...(selector.methodName && { methodName: selector.methodName }), sourcePath: snapshot.path } };
-      }));
-      const groups = new Map<string, { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }>();
-      for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+      const groups = await this.testGroups(prepared, input);
       const runtime = resolveTestRuntime(this.config);
-      const runs = await Promise.all([...groups.values()].map(group => runJUnit({ java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: input.vmArgs, systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: input.includeOutput, includeStackTrace: input.includeStackTrace, ...(coverageRuntime && { coverage: { agent: coverageRuntime.agent, includes: input.coverage?.includes ?? [] } }), ...(signal && { signal }), outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groups.size * 3)))) })));
-      const coverage = coverageRuntime ? await createCoverageReport({ java: runtime.java, cli: coverageRuntime.cli, executionData: runs.flatMap(item => item.coverageData ? [item.coverageData] : []), classpaths: launches.flatMap(item => item.classpaths), sourceFiles: workspaceJavaFiles(this.paths.root).filter(isProductionJavaPath), cwd: this.paths.root, timeoutMs: input.timeoutMs, ...(signal && { signal }) }) : undefined;
+      const runs = await Promise.all([...groups.values()].map(group => runJUnit({ ...this.testRunOptions(group, runtime, input, groups.size, coverageRuntime?.agent), ...(signal && { signal }) })));
+      const coverage = coverageRuntime ? await createCoverageReport({ java: runtime.java, cli: coverageRuntime.cli, executionData: runs.flatMap(item => item.coverageData ? [item.coverageData] : []), classpaths: [...groups.values()].flatMap(group => group.classpaths), sourceFiles: workspaceJavaFiles(this.paths.root).filter(isProductionJavaPath), cwd: this.paths.root, timeoutMs: input.timeoutMs, ...(signal && { signal }) }) : undefined;
       run = { ...mergeJunitRuns(runs, Date.now() - started), ...(coverage && { coverage }) };
       this.testRuns.set(fp, run, this.sync.indexGeneration);
     }
@@ -273,7 +252,32 @@ export class JavaService {
       const report = run.coverage; const coveragePage = input.coverage.details === "files" ? this.paginate(report.files, input.coverage.limit, input.coverage.cursor, { ...query, result: "coverage" }, files => ({ files })) : undefined;
       coverage = { complete: report.complete, ...(report.summary && { summary: report.summary }), ...(coveragePage && { files: coveragePage.items }), ...(input.coverage.includeTotal && { total: report.files.length }), ...(coveragePage?.nextCursor && { nextCursor: coveragePage.nextCursor }), ...(report.message && { message: report.message }) };
     }
-    return { status: run.status, durationMs: run.durationMs, counts: run.counts, failures: page.items, ...(input.includeTotal && { total: run.failures.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(run.message && { message: run.message }), ...(!input.cursor && !input.coverage?.cursor && run.output && { output: run.output }), ...(coverage && { coverage }) };
+    return { status: run.status, durationMs: run.durationMs, counts: run.counts, ...paged(page, "failures", input.includeTotal, run.failures.length), ...(run.message && { message: run.message }), ...(!input.cursor && !input.coverage?.cursor && run.output && { output: run.output }), ...(coverage && { coverage }) };
+  }
+  private async prepareTestSelectors(input: TestInput, signal: AbortSignal | undefined, classify: boolean): Promise<PreparedTest[]> {
+    if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
+    if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
+    const requested = input.tests ?? [{ path: input.path!, ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
+    const prepared = await Promise.all(requested.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path) })));
+    const configuredExclusions = this.excludedProjectRoots(); if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`);
+    if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
+    if (classify) { const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]); if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`); }
+    return prepared;
+  }
+  private async testGroups(prepared: PreparedTest[], input: TestInput): Promise<Map<string, TestLaunchGroup>> {
+    const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {
+      const className = selector.className ?? defaultTestClass(snapshot); validateTestSelector(className, selector.methodName);
+      const classpath = await this.client.testClasspaths(snapshot.uri, input.timeoutMs); const additional = resolveTestClasspathEntries(this.config.testClasspathEntries ?? [], classpath.projectRoot, this.paths.root); const classpaths = [...new Set([...(classpath.classpaths ?? []), ...(classpath.modulepaths ?? []), ...additional])];
+      if (!classpaths.length) throw new JavaLspMcpError("TEST_CLASSPATH_EMPTY", `JDT returned no test runtime classpath for ${snapshot.path}`);
+      const cwd = input.workingDirectory ? this.paths.resolve(input.workingDirectory) : nearestProjectDirectory(dirname(this.paths.resolve(snapshot.path)), this.paths.root);
+      return { key: `${cwd}\0${classpaths.join("\0")}`, cwd, classpaths, selector: { className, ...(selector.methodName && { methodName: selector.methodName }), sourcePath: snapshot.path } };
+    }));
+    const groups = new Map<string, TestLaunchGroup>();
+    for (const launch of launches) { const group = groups.get(launch.key) ?? { cwd: launch.cwd, classpaths: launch.classpaths, selectors: [] }; if (!group.selectors.some(selector => selector.className === launch.selector.className && selector.methodName === launch.selector.methodName)) group.selectors.push(launch.selector); groups.set(launch.key, group); }
+    return groups;
+  }
+  private testRunOptions(group: TestLaunchGroup, runtime: ReturnType<typeof resolveTestRuntime>, input: TestInput, groupCount: number, agent?: string, jdwp = false): JunitRunOptions {
+    return { java: runtime.java, console: runtime.console, classpaths: group.classpaths, selectors: group.selectors, cwd: group.cwd, vmArgs: jdwp ? [...input.vmArgs, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"] : input.vmArgs, systemProperties: input.systemProperties, timeoutMs: input.timeoutMs, includeOutput: !jdwp && input.includeOutput, includeStackTrace: !jdwp && input.includeStackTrace, ...(agent && { coverage: { agent, includes: input.coverage?.includes ?? [] } }), outputLimit: Math.min(4_000, Math.max(1_024, Math.floor(this.config.resultBudget / Math.max(1, groupCount * 3)))) };
   }
   async affectedTests(input: AffectedTestsInput, signal?: AbortSignal): Promise<object> {
     return this.queueAnalysis(async () => {
@@ -281,7 +285,7 @@ export class JavaService {
       const query = { tool: "affectedTests", ...queryOf(input), hash: target.snapshot.hash };
       const result = await this.cachedAnalysis(query, input.cursor, () => this.calculateAffectedTests(target, input, signal));
       const page = this.paginate(result.items, input.limit, input.cursor, query, tests => ({ tests }));
-      return { tests: page.items, complete: result.complete, ...(input.includeTotal && { total: result.items.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(result.message && { message: result.message }) };
+      return { ...paged(page, "tests", input.includeTotal, result.items.length), complete: result.complete, ...(result.message && { message: result.message }) };
     });
   }
   private async calculateAffectedTests(target: { snapshot: Snapshot; position: { line: number; character: number } }, input: AffectedTestsInput, signal?: AbortSignal): Promise<AnalysisResult> {
@@ -320,7 +324,7 @@ export class JavaService {
       const query = { tool: "unusedCode", ...queryOf(input) };
       const result = await this.cachedAnalysis(query, input.cursor, () => this.calculateUnusedCode(input, signal));
       const page = this.paginate(result.items, input.limit, input.cursor, query, candidates => ({ candidates }));
-      return { candidates: page.items, complete: result.complete, ...(input.includeTotal && { total: result.items.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(result.message && { message: result.message }) };
+      return { ...paged(page, "candidates", input.includeTotal, result.items.length), complete: result.complete, ...(result.message && { message: result.message }) };
     });
   }
   private async calculateUnusedCode(input: UnusedCodeInput, signal?: AbortSignal): Promise<AnalysisResult> {
@@ -355,7 +359,7 @@ export class JavaService {
   async codeActions(input: { path: string; range: { line: number; column: number; endLine: number; endColumn: number }; diagnosticCodes: (string | number)[]; kinds: string[]; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
     const snap = await this.prepareFile(input.path); const r = toLspRange(snap, input.range); const diagnostics = (this.client.diagnostics.get(snap.uri)?.diagnostics ?? []).filter(d => !input.diagnosticCodes.length || input.diagnosticCodes.includes(d.code ?? "")); const raw = await this.client.codeActions(snap.uri, r, diagnostics, input.kinds, this.config.timeoutMs);
     const values = raw.map(action => compact({ id: this.actions.put(action, this.sync.indexGeneration), title: action.title, kind: action.kind, preferred: action.isPreferred || undefined, diagnosticCodes: action.diagnostics?.map(d => d.code).filter(v => v !== undefined) })); const query = { tool: "codeActions", ...queryOf(input), hash: snap.hash };
-    const page = this.paginate(values, input.limit, input.cursor, query, actions => ({ actions })); return { actions: page.items, ...(input.includeTotal && { total: values.length }), ...(page.nextCursor && { nextCursor: page.nextCursor }) };
+    const page = this.paginate(values, input.limit, input.cursor, query, actions => ({ actions })); return { ...paged(page, "actions", input.includeTotal, values.length) };
   }
   async editPreview(input: { operation: string; includeDiff: boolean; limit: number; includeTotal: boolean; cursor?: string | undefined; target?: SymbolTarget | undefined; newName?: string | undefined; id?: string | undefined; path?: string | undefined; range?: { line: number; column: number; endLine: number; endColumn: number } | undefined }): Promise<object> {
     return this.editQueue.run(() => this.calculateEdit(input));
@@ -393,7 +397,7 @@ export class JavaService {
     const files: object[] = []; const diffs = new Map<string, string>(); let editCount = 0;
     for (const [uri, edits] of changes) { const resolved = this.paths.fromUri(uri); if (!resolved.editable) throw new JavaLspMcpError("EXTERNAL_EDIT", `JDT proposed an edit outside the workspace: ${resolved.path}`); const absolute = this.paths.resolve(resolved.path); const before = await readFile(absolute, "utf8"); const baseHash = sha256(before); const sorted = validateAndSortEdits(before, edits); const again = await readFile(absolute, "utf8"); if (sha256(again) !== baseHash) throw new JavaLspMcpError("STALE_EDIT", `File changed while edit was calculated: ${resolved.path}`); files.push({ path: resolved.path, baseHash, edits: sorted.map(e => publicEdit(before, e)) }); editCount += sorted.length; if (input.includeDiff) diffs.set(resolved.path, unifiedDiff(resolved.path, before, sorted)); }
     const query = { tool: "editPreview", ...queryOf(input), files: files.map(file => (file as { path: string; baseHash: string }).path), hashes: files.map(file => (file as { path: string; baseHash: string }).baseHash) }; const page = this.paginate(files, input.limit, input.cursor, query, selected => ({ files: selected, editCount })); const diff = page.items.map(file => diffs.get((file as { path: string }).path)).filter(Boolean).join("\n");
-    return { files: page.items, ...(input.includeTotal && { total: files.length }), editCount, ...(page.nextCursor && { nextCursor: page.nextCursor }), ...(input.includeDiff && diff && Buffer.byteLength(diff, "utf8") <= this.config.resultBudget && { unifiedDiff: diff }) };
+    return { ...paged(page, "files", input.includeTotal, files.length), editCount, ...(input.includeDiff && diff && Buffer.byteLength(diff, "utf8") <= this.config.resultBudget && { unifiedDiff: diff }) };
   }
   private queueAnalysis(run: () => Promise<object>): Promise<object> {
     return this.analysisQueue.run(run);
@@ -523,12 +527,13 @@ export class JavaService {
     return `projects:${[...new Set(roots as string[])].sort().join("\0")}`;
   }
   private enqueueBuild<T>(work: () => Promise<T>): Promise<T> { return this.buildQueue.run(work); }
+  private async settleDiagnostics(status: number, epoch: number, deadline: number): Promise<void> { if (status === 2 && Date.now() < deadline) await this.client.diagnostics.settleAfter?.(epoch, Math.min(2_000, remaining(deadline))); }
   private async configuredBuild(clean: boolean, timeoutMs: number, requiredUris: string[] = [], projectOnly = false): Promise<{ status: number; excludedRoots: string[]; builtRoots?: string[] }> {
     const selectors = [...new Set((this.config.excludedProjects ?? []).map(normalizeProjectSelector).filter(Boolean))];
     if (!selectors.length && !projectOnly) {
       const deadline = operationalDeadline(timeoutMs); const diagnosticsEpoch = this.client.diagnostics.currentEpoch?.() ?? 0; const status = await this.client.build(clean, remaining(deadline));
       if (status !== 2 || Date.now() >= deadline) return { status, excludedRoots: [] };
-      await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      await this.settleDiagnostics(status, diagnosticsEpoch, deadline);
       if (!this.client.diagnostics.all().some(set => set.diagnostics.some(item => prerequisiteProjectName(item.message)))) return { status, excludedRoots: [] };
       const projects = await this.client.projects(remaining(deadline)); const recovery = await this.buildProjectsWithPrerequisites(projects, projects, clean, remaining(deadline));
       return { status: recovery.status, excludedRoots: [] };
@@ -552,7 +557,7 @@ export class JavaService {
     const build = async (roots: string[]): Promise<number> => {
       const diagnosticsEpoch = this.client.diagnostics.currentEpoch?.() ?? 0; const status = await this.client.buildProjects(roots, clean, remaining(deadline));
       if (status !== 2 || Date.now() >= deadline) return status;
-      await this.client.diagnostics.settleAfter?.(diagnosticsEpoch, Math.min(2_000, remaining(deadline)));
+      await this.settleDiagnostics(status, diagnosticsEpoch, deadline);
       let recovered = false;
       for (const root of roots) {
         const names = this.client.diagnostics.all().filter(set => fileUriWithin(set.uri, root)).flatMap(set => set.diagnostics.map(item => prerequisiteProjectName(item.message)).filter((name): name is string => Boolean(name)));
@@ -734,6 +739,7 @@ function sourceExcerpt(content: string, requestedStart: number, requestedEnd: nu
 function compareLocation(left: object, right: object): number { const a = left as { path?: string; line?: number; startLine?: number }; const b = right as { path?: string; line?: number; startLine?: number }; return String(a.path).localeCompare(String(b.path)) || (a.line ?? a.startLine ?? 0) - (b.line ?? b.startLine ?? 0); }
 function queryOf<T extends { cursor?: string | undefined; limit: number; includeTotal: boolean }>(input: T): Omit<T, "cursor" | "limit" | "includeTotal"> { const { cursor: _cursor, limit: _limit, includeTotal: _includeTotal, ...query } = input; return query; }
 function testQueryOf(input: TestInput): object { const base = queryOf(input); if (!base.coverage) return base; const { cursor: _cursor, limit: _limit, includeTotal: _includeTotal, ...coverage } = base.coverage; return { ...base, coverage }; }
+function paged(page: { items: object[]; nextCursor?: string }, key: string, includeTotal: boolean, total: number): Record<string, unknown> { return { [key]: page.items, ...(includeTotal && { total }), ...(page.nextCursor && { nextCursor: page.nextCursor }) }; }
 function workspaceJavaFiles(root: string): string[] {
   return workspaceFiles(root, name => name.endsWith(".java")).map(path => relative(root, path).split(sep).join("/")).sort();
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { LspClient } from "../../src/jdtls/client.js";
-import { JavaService, resolveTestClasspathEntries, symbolNameMatches } from "../../src/mcp/service.js";
+import { JavaService, resolveTestClasspathEntries, symbolNameMatches, type TestInput } from "../../src/mcp/service.js";
 import type { Snapshot } from "../../src/types.js";
 import type { WorkspacePaths } from "../../src/workspace/paths.js";
 import type { WorkspaceSynchronizer } from "../../src/workspace/watcher.js";
@@ -22,6 +22,7 @@ const outline = [{ name: "A", kind: 5, range: { start: { line: 0, character: 0 }
 const paths = { resolve: () => "C:/workspace/src/A.java", fromUri: () => ({ path: snapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
 const sync = { indexGeneration: 1, verify: async () => snapshot, flush: async () => {}, snapshots: { get: () => snapshot, getByUri: () => snapshot, all: () => [snapshot] } } as unknown as WorkspaceSynchronizer;
 const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
+const testRequest = (path: string, compileProjectOnly: boolean): TestInput => ({ path, compile: "incremental", compileProjectOnly, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false });
 
 test("additional test classpath entries resolve from the selected JDT project root", () => {
   const workspace = resolve("test/fixtures/unmanaged");
@@ -150,7 +151,7 @@ test("test runs reuse one successful compilation per workspace generation", asyn
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, build: async (clean: boolean) => { builds.push(clean); return 1; }, diagnostics: { all: () => [] }, testClasspaths: async () => ({}) } as unknown as LspClient;
   const mutableSync = { indexGeneration: 7, verify: async () => snapshot, flush: async () => {}, snapshots: { get: () => snapshot, getByUri: () => snapshot, all: () => [snapshot] } };
   const service = new JavaService({ ...config, trustWorkspace: true }, paths, mutableSync as unknown as WorkspaceSynchronizer, client);
-  const request = { path: snapshot.path, compile: "incremental" as const, compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request = testRequest(snapshot.path, false);
   const run = (compile: "incremental" | "clean" = "incremental"): Promise<object> => service.runTests({ ...request, compile });
   await assert.rejects(run(), /no test runtime classpath/u);
   await assert.rejects(run(), /no test runtime classpath/u);
@@ -166,7 +167,7 @@ test("test runs reuse one successful compilation per workspace generation", asyn
 test("concurrent test runs share the same compilation", async () => {
   let builds = 0;
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, build: async () => { builds++; await new Promise(resolve => setTimeout(resolve, 20)); return 1; }, diagnostics: { all: () => [] }, testClasspaths: async () => ({}) } as unknown as LspClient;
-  const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client); const request = { path: snapshot.path, compile: "incremental" as const, compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client); const request = testRequest(snapshot.path, false);
   await Promise.allSettled([service.runTests(request), service.runTests(request)]); assert.equal(builds, 1);
 });
 
@@ -175,7 +176,7 @@ test("compileProjectOnly builds only the JDT project containing the selected tes
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, projects: async () => [logicUri, testsUri], buildProjects: async (uris: string[]) => { built = uris; return 1; }, diagnostics: { all: () => [] }, testClasspaths: async () => ({}) } as unknown as LspClient;
   const localSync = { indexGeneration: 1, verify: async () => localSnapshot, flush: async () => {}, snapshots: { all: () => [localSnapshot] } } as unknown as WorkspaceSynchronizer;
   const localPaths = { root: workspace, fromUri: () => ({ path: localSnapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
-  const request = { path: localSnapshot.path, compile: "incremental" as const, compileProjectOnly: true, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request = testRequest(localSnapshot.path, true);
   await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(request), /no test runtime classpath/u); assert.deepEqual(built, [testsUri]);
 });
 
@@ -184,7 +185,7 @@ test("project-only compilation recursively builds loaded prerequisites and retri
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, projects: async () => [coreUri, logicUri, testsUri], buildProjects: async (uris: string[]) => { calls.push(uris); const root = uris[0]; if (root === testsUri && calls.filter(call => call[0] === testsUri).length === 1) { sets = [{ uri: `${testsUri}/src/T.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite logic is built. Cleaning and building all projects is recommended" }] }]; return 2; } if (root === logicUri && calls.filter(call => call[0] === logicUri).length === 1) { sets = [{ uri: `${logicUri}/src/L.java`, diagnostics: [{ severity: 1, message: "The project cannot be built until its prerequisite core is built. Cleaning and building all projects is recommended" }] }]; return 2; } sets = []; return 1; }, diagnostics: { currentEpoch: () => calls.length, settleAfter: async () => true, all: () => sets }, testClasspaths: async () => ({}) } as unknown as LspClient;
   const localSnapshot = { ...snapshot, path: "tests/src/A.java", uri: `${testsUri}/src/A.java` }; const localSync = { indexGeneration: 1, verify: async () => localSnapshot, flush: async () => {}, snapshots: { all: () => [localSnapshot] } } as unknown as WorkspaceSynchronizer;
   const localPaths = { root: workspace, fromUri: () => ({ path: localSnapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
-  const request = { path: localSnapshot.path, compile: "incremental" as const, compileProjectOnly: true, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request = testRequest(localSnapshot.path, true);
   await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(request), /no test runtime classpath/u);
   assert.deepEqual(calls, [[testsUri], [logicUri], [coreUri], [logicUri], [testsUri]]);
 });
@@ -192,7 +193,7 @@ test("failed test compilation is not reused", async () => {
   let builds = 0;
   const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, build: async () => { builds++; return 2; }, diagnostics: { all: () => [] } } as unknown as LspClient;
   const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
-  const request = { path: snapshot.path, compile: "incremental" as const, compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request = testRequest(snapshot.path, false);
   assert.equal((await service.runTests(request) as { status: string }).status, "compile-failed");
   assert.equal((await service.runTests(request) as { status: string }).status, "compile-failed");
   assert.equal(builds, 2);

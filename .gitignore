@@ -5,3 +5,4 @@ coverage/
 artifacts/
 .runtime/
 *.log
+.cortexkit/
