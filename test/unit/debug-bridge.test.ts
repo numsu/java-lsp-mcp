@@ -158,3 +158,34 @@ test("JDI bridge drives breakpoints, filtering, stale stops, and pending executi
   const detached = outputs.java_debug_detach.parse(await bridge.ok("detach", 30_000, sessionId)) as { detached: boolean; targetState: string };
   assert.equal(detached.detached, true); assert.equal(detached.targetState, "running");
 });
+
+test("JDI bridge re-attach survives the target re-arming its JDWP listener after a prior debugger disconnects", { skip: !java || !javac, timeout: 120_000 }, async t => {
+  const root = join(resolve("."), ".tmp-debug-bridge-rearm-test"); const classes = join(root, "classes");
+  const targetSource = join(root, "Target.java");
+  mkdirSync(classes, { recursive: true }); writeFileSync(targetSource, TARGET_SOURCE);
+  const compiled = spawnSync(javac, ["-g", "-d", classes, targetSource], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const target = spawn(java, ["-cp", classes, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:0", "Target"], { stdio: ["ignore", "pipe", "pipe"] });
+  let targetStderr = ""; target.stderr.on("data", chunk => { targetStderr += String(chunk); }); target.stdout.on("data", chunk => { targetStderr += String(chunk); });
+  const bridge = new Bridge(java);
+  t.after(() => { target.kill(); bridge.close(); rmSync(root, { recursive: true, force: true }); });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline && !targetStderr.includes("Listening for transport dt_socket at address:")) await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
+  assert.ok(targetStderr.includes("Listening for transport dt_socket at address:"), targetStderr);
+  assert.ok(target.pid);
+
+  // Session A holds the JDWP connection, so the target's listener address is empty while A is attached.
+  const a = await bridge.ok("attach", 30_000, `local:${target.pid}`, "15000");
+  const sessionIdA = (a as { session: { sessionId: string } }).session.sessionId;
+
+  // B attaches while A is connected; its first attempt(s) hit the empty listener window and must retry
+  // until A detaches and the target re-arms. Without the retry this fails with "Unable to determine transport endpoint".
+  const detachA = setTimeout(() => { void bridge.request("detach", 30_000, sessionIdA).catch(() => undefined); }, 600);
+  const b = await bridge.ok("attach", 30_000, `local:${target.pid}`, "10000");
+  clearTimeout(detachA);
+  const sessionIdB = (b as { session: { sessionId: string } }).session.sessionId;
+  assert.notEqual(sessionIdB, sessionIdA, "re-attach must create a fresh session");
+
+  const detachedB = await bridge.ok("detach", 30_000, sessionIdB);
+  assert.equal((detachedB as { detached: boolean }).detached, true);
+});

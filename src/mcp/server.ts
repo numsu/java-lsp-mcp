@@ -24,7 +24,7 @@ export const descriptions: Record<ToolName, string> = {
   java_code_actions: "List JDT quick fixes/refactorings and mint short-lived handles. Does not apply changes.",
   java_edit_preview: "Calculate rename, code-action, import, or formatting edits without modifying files. Apply the preview with the normal patch tool.",
   java_debug_targets: "Discover local Java processes that were started with the JDWP agent. This is read-only and does not attach; call java_debug_attach with a selected targetId.",
-  java_debug_attach: "Attach a JDI debug session to one selected local JDWP target. A target normally accepts only one debugger, so detach Eclipse or another debugger first.",
+  java_debug_attach: "Attach a JDI debug session to one selected local JDWP target. A target normally accepts only one debugger, so detach Eclipse or another debugger first. Re-attaching right after java_debug_detach is safe: the attach briefly retries while the target re-arms its JDWP listener instead of failing with a transport-endpoint error.",
   java_debug_sessions: "List debug sessions owned by this MCP server and their running, stopped, terminated, or disconnected state.",
   java_debug_set_breakpoints: "Idempotently replace all source-line breakpoints for one workspace-relative Java source file. Unloaded classes remain pending until class preparation.",
   java_debug_threads: "List target JVM threads and the current location of suspended threads. System/infrastructure threads are omitted by default; packagePrefix matches the suspended thread's declaring class and namePattern is a full-match Java regular expression (an invalid pattern returns INVALID_PATTERN).",

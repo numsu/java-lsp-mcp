@@ -70,8 +70,17 @@ class DebugBridge {
   static String attach(String targetId, int timeout) throws Exception {
     if (!targetId.matches("local:\\d+")) throw new DebugFailure("TARGET_NOT_FOUND", "Invalid local debug target: " + targetId);
     String pid = targetId.substring(6); AttachingConnector connector = Bootstrap.virtualMachineManager().attachingConnectors().stream().filter(c -> c.name().equals("com.sun.jdi.ProcessAttach")).findFirst().orElseThrow(() -> new DebugFailure("UNSUPPORTED_CAPABILITY", "This JDK has no ProcessAttach connector"));
-    Map<String, Connector.Argument> arguments = connector.defaultArguments(); arguments.get("pid").setValue(pid); Connector.Argument timeoutArg = arguments.get("timeout"); if (timeoutArg != null) timeoutArg.setValue(String.valueOf(timeout));
-    VirtualMachine vm; try { vm = connector.attach(arguments); } catch (IOException e) { throw new DebugFailure("TARGET_NOT_DEBUGGABLE", e.getMessage()); }
+    int connectTimeout = Math.min(timeout, 2000); long deadline = System.currentTimeMillis() + Math.min(timeout, 5000);
+    Map<String, Connector.Argument> arguments = connector.defaultArguments(); arguments.get("pid").setValue(pid); Connector.Argument timeoutArg = arguments.get("timeout"); if (timeoutArg != null) timeoutArg.setValue(String.valueOf(connectTimeout));
+    VirtualMachine vm;
+    while (true) {
+      try { vm = connector.attach(arguments); break; }
+      catch (IOException e) {
+        boolean rearming = e.getMessage() != null && e.getMessage().contains("Unable to determine transport endpoint");
+        if (!rearming || System.currentTimeMillis() >= deadline) throw new DebugFailure("TARGET_NOT_DEBUGGABLE", e.getMessage());
+        try { Thread.sleep(50); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new DebugFailure("TARGET_NOT_DEBUGGABLE", e.getMessage()); }
+      }
+    }
     String id = token("session"); Session session = new Session(id, targetId, Long.parseLong(pid), vm); SESSIONS.put(id, session); session.start(); return session.info();
   }
 
