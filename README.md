@@ -13,20 +13,58 @@ Java semantic intelligence for Model Context Protocol (MCP) clients, powered by 
 - Read-only fixes, refactorings, import, and formatting previews
 - Bounded, paginated agent-friendly results
 
-## Requirements
+## Prerequisites
 
-Release archives bundle JDT LS, JUnit, and JaCoCo; provide Node.js 24+ and a JDK through `JAVA_HOME` or `--tooling-jdk`. Source builds require Node.js 24 and npm.
+- **Node.js 24+** — the server runs on your Node; release launchers use `node` from `PATH`.
+- **A JDK** — pointed to by `JAVA_HOME` or `--tooling-jdk`. It runs JDT LS and your tests.
+- **A Java workspace** — Maven, Gradle, Eclipse, modular, or unmanaged.
 
-## Quick start
+Release archives bundle JDT LS, JUnit, and JaCoCo. Everything else comes from the prerequisites above.
+
+## Installation
+
+Download the archive for your platform from the [releases page](https://github.com/numsu/java-lsp-mcp/releases), unpack it, and run:
 
 ```sh
-npm ci
-npm run fetch-runtime
-npm run check
-bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
+java-lsp-mcp/bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
 ```
 
-On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /project` to check setup. See [Getting started](docs/getting-started.md) for client configuration and trust guidance.
+On Windows use `bin\java-lsp-mcp.cmd`. Then verify with `java-lsp-mcp doctor --workspace /project`.
+
+To use it in VS Code, add the launcher to `.vscode/mcp.json` in your project:
+
+```json
+{
+  "servers": {
+    "java-lsp-mcp": {
+      "command": "/absolute/path/to/java-lsp-mcp/bin/java-lsp-mcp",
+      "args": ["serve", "--workspace", "/absolute/path/to/project", "--trust-workspace"]
+    }
+  }
+}
+```
+
+`java-lsp-mcp print-config generic --workspace /project --trust-workspace` prints the equivalent snippet for other clients.
+
+## Configuration
+
+Flags for `serve` (a `java-lsp-mcp.json` or `java-lsp-mcp.toml` file in the workspace and `JAVA_LSP_MCP_*` environment variables work too; flags win, then env, then the file):
+
+| Flag | What it does |
+|---|---|
+| `--workspace` | The project to work on (absolute path, required). |
+| `--trust-workspace` | Allow Maven/Gradle import, compilation, and test execution. Without it the server only reads code — review the project first. |
+| `--tooling-jdk` | JDK that runs JDT LS (defaults to `JAVA_HOME`). |
+| `--project-jdk` | JDK that runs your tests (defaults to the tooling JDK). |
+| `--offline` | Never touch the network; Maven/Gradle resolve from caches only. |
+| `--exclude-project` | Leave a module out of import, compilation, and tests (repeatable). |
+| `--test-classpath-entry` | Extra directory or jar on the test runtime classpath (repeatable). |
+| `--jdtls-home` | Use your own JDT Language Server instead of the bundled one. |
+| `--source-encoding` | Override file-encoding detection when the project has no Eclipse settings. |
+| `--timeout`, `--result-budget` | Shared operation timeout in ms and per-result output budget in bytes. |
+| `--log-level`, `--max-heap`, `--result-mode` | Operational tuning; all logs go to stderr, never stdout. |
+
+Other commands: `doctor` checks the setup, `version` prints versions, `describe-tools` prints the complete machine-readable tool schemas, `print-config` generates client configuration, and `clear-cache` wipes the workspace index.
 
 ## Tools
 
@@ -54,22 +92,20 @@ On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /pro
 | `java_debug_execute` | Continue and step over, into, or out |
 | `java_debug_hot_swap` | ECJ/JDI Hot Code Replace with change and active-frame reporting |
 
-See the [tool reference](docs/tools.md) or run `java-lsp-mcp describe-tools`.
-
-## Documentation
-
-- [Documentation index](docs/README.md)
-- [Getting started](docs/getting-started.md)
-- [Tool reference](docs/tools.md)
-- [Configuration](docs/configuration.md)
-- [Workflows and testing](docs/workflows.md)
-- [Architecture](docs/architecture.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Releases](docs/releases.md)
+Run `java-lsp-mcp describe-tools` for the complete machine-readable tool schemas.
 
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Build from source with:
+
+```sh
+npm ci
+npm run fetch-runtime
+npm run check
+bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
+```
 
 ## Security
 

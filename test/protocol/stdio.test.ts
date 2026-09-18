@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
+import { LATEST_KNOWN_MODERN } from "../../src/mcp/handshake.js";
 
 const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "test", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
 function start(): { child: ChildProcessWithoutNullStreams; next: () => Promise<Record<string, unknown>> } {
@@ -16,6 +18,27 @@ test("modern stdio discovery and static tools list", async () => {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta } })}\n`); const discover = await next(); const result = discover.result as Record<string, unknown>; assert.deepEqual(result.supportedVersions, ["2026-07-28"]);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } })}\n`); const listed = (await next()).result as { tools: Array<Record<string, unknown>> }; assert.equal(listed.tools.length, 26); assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 40_000); assert.equal((listed.tools[0]!.annotations as Record<string, unknown>).readOnlyHint, true); assert.equal("outputSchema" in listed.tools[0]!, false); const status = listed.tools.find(t => t.name === "java_status")!; assert.ok("waitForReady" in (status.inputSchema as { properties: Record<string, unknown> }).properties); const definition = listed.tools.find(t => t.name === "java_find_definition")!; const target = ((definition.inputSchema as { properties: Record<string, unknown> }).properties.target as Record<string, unknown>); assert.ok(Array.isArray(target.oneOf));
   } finally { child.kill(); }
+});
+async function handshakeOnce(message: object): Promise<{ response: Record<string, unknown>; stderr: string }> {
+  const child = spawn(process.execPath, [resolve("dist/server.mjs"), "serve", "--workspace", resolve("test/fixtures/unmanaged"), "--tooling-jdk", resolve("missing-jdk"), "--jdtls-home", resolve("missing-jdtls"), "--timeout", "25"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, JAVA_LSP_MCP_CACHE_DIR: resolve(".runtime/test-cache") } });
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr += String(chunk); });
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  try {
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+    const response = JSON.parse((await lines.next()).value as string) as Record<string, unknown>;
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+    return { response, stderr };
+  } finally { child.kill(); }
+}
+test("unknown handshake versions warn instead of failing", async () => {
+  const claim = (version: string): Record<string, unknown> => ({ "io.modelcontextprotocol/protocolVersion": version, "io.modelcontextprotocol/clientInfo": { name: "test", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} });
+  const modern = await handshakeOnce({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: claim("2030-05-05") } });
+  assert.equal((modern.response.result as { supportedVersions: string[] }).supportedVersions.includes(LATEST_KNOWN_MODERN), true);
+  assert.match(modern.stderr, /Unsupported MCP protocol version 2030-05-05/u);
+  const legacy = await handshakeOnce({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "1999-01-01", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  assert.ok(!("error" in legacy.response));
+  assert.ok(SUPPORTED_PROTOCOL_VERSIONS.includes((legacy.response.result as { protocolVersion: string }).protocolVersion));
 });
 test("VS Code's 2025-11-25 initialize and tool callbacks are supported", async () => {
   const { child, next } = start(); try {
