@@ -189,3 +189,108 @@ test("JDI bridge re-attach survives the target re-arming its JDWP listener after
   const detachedB = await bridge.ok("detach", 30_000, sessionIdB);
   assert.equal((detachedB as { detached: boolean }).detached, true);
 });
+
+test("JDI bridge attach names the session still holding the target", { skip: !java || !javac, timeout: 120_000 }, async t => {
+  const root = join(resolve("."), ".tmp-debug-bridge-holder-test"); const classes = join(root, "classes");
+  const targetSource = join(root, "Target.java");
+  mkdirSync(classes, { recursive: true }); writeFileSync(targetSource, TARGET_SOURCE);
+  const compiled = spawnSync(javac, ["-g", "-d", classes, targetSource], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const target = spawn(java, ["-cp", classes, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:0", "Target"], { stdio: ["ignore", "pipe", "pipe"] });
+  let targetStderr = ""; target.stderr.on("data", chunk => { targetStderr += String(chunk); }); target.stdout.on("data", chunk => { targetStderr += String(chunk); });
+  const bridge = new Bridge(java);
+  t.after(() => { target.kill(); bridge.close(); rmSync(root, { recursive: true, force: true }); });
+  const listening = Date.now() + 30_000;
+  while (Date.now() < listening && !targetStderr.includes("Listening for transport dt_socket at address:")) await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
+  assert.ok(targetStderr.includes("Listening for transport dt_socket at address:"), targetStderr);
+  assert.ok(target.pid);
+  const attached = await bridge.ok("attach", 30_000, `local:${target.pid}`, "15000") as { session: { sessionId: string } };
+  const holder = attached.session.sessionId;
+  // While the holder stays connected the listener address stays empty, so the bounded
+  // retry must exhaust and name the holder instead of repeating the JDI message.
+  const refused = await bridge.request("attach", 30_000, `local:${target.pid}`, "1200");
+  assert.equal(refused.status, "ERR"); assert.equal(refused.payload.code, "TARGET_NOT_DEBUGGABLE");
+  assert.match(String(refused.payload.message), /still held by debug session/);
+  assert.equal((refused.payload.details as { targetId: string; sessionId: string }).sessionId, holder);
+  const detached = await bridge.ok("detach", 30_000, holder) as { detached: boolean };
+  assert.equal(detached.detached, true);
+});
+
+test("JDI bridge resolves a blank stopId to the current stop", { skip: !java || !javac, timeout: 120_000 }, async t => {
+  const root = join(resolve("."), ".tmp-debug-bridge-blank-stop-test"); const classes = join(root, "classes");
+  const targetSource = join(root, "Target.java");
+  mkdirSync(classes, { recursive: true }); writeFileSync(targetSource, TARGET_SOURCE);
+  const compiled = spawnSync(javac, ["-g", "-d", classes, targetSource], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const target = spawn(java, ["-cp", classes, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:0", "Target"], { stdio: ["ignore", "pipe", "pipe"] });
+  let targetStderr = ""; target.stderr.on("data", chunk => { targetStderr += String(chunk); }); target.stdout.on("data", chunk => { targetStderr += String(chunk); });
+  const bridge = new Bridge(java);
+  t.after(() => { target.kill(); bridge.close(); rmSync(root, { recursive: true, force: true }); });
+  const listening = Date.now() + 30_000;
+  while (Date.now() < listening && !targetStderr.includes("Listening for transport dt_socket at address:")) await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
+  assert.ok(targetStderr.includes("Listening for transport dt_socket at address:"), targetStderr);
+  assert.ok(target.pid);
+  const [targetId] = (outputs.java_debug_targets.parse(await bridge.ok("targets", 30_000, "", "false")) as { targets: Array<{ targetId: string; pid: number }> }).targets.filter(entry => entry.pid === target.pid);
+  assert.ok(targetId, "launched target must be discovered as attachable");
+  const attached = outputs.java_debug_attach.parse(await bridge.ok("attach", 30_000, `local:${target.pid}`, "15000")) as { session: { sessionId: string } };
+  const sessionId = attached.session.sessionId;
+  await bridge.ok("execute", 30_000, sessionId, "continue", "", "", "0");
+  await bridge.ok("breakpoints", 30_000, sessionId, targetSource, "8", "10000");
+  const hit = outputs.java_debug_wait_for_stop.parse(await bridge.ok("wait", 60_000, sessionId, "20000")) as { outcome: string; stopId: string; threadId: number };
+  assert.equal(hit.outcome, "stopped");
+  const trace = outputs.java_debug_stack_trace.parse(await bridge.ok("stack", 30_000, sessionId, "", String(hit.threadId), "0", "20", "", "false")) as { stopId: string; frames: Array<{ frameId: string }> };
+  assert.equal(trace.stopId, hit.stopId); assert.ok(trace.frames.length);
+  const seen = outputs.java_debug_variables.parse(await bridge.ok("variables", 30_000, sessionId, "", trace.frames[0]!.frameId, "", "all", "0", "50", "true", "10", "false")) as { stopId: string };
+  assert.equal(seen.stopId, hit.stopId);
+  const stepped = outputs.java_debug_execute.parse(await bridge.ok("execute", 60_000, sessionId, "step_over", String(hit.threadId), "", "20000")) as { outcome: string; stopId: string };
+  assert.equal(stepped.outcome, "stopped"); assert.notEqual(stepped.stopId, hit.stopId);
+  await bridge.ok("detach", 30_000, sessionId);
+});
+
+const EXITING_TARGET_SOURCE = `public class ExitingTarget {
+  static int answer() { return 41 + 1; }
+  public static void main(String[] args) { System.out.println(answer()); }
+}
+`;
+
+test("JDI bridge reports queued stops truthfully and ends sessions when the target exits", { skip: !java || !javac, timeout: 120_000 }, async t => {
+  const root = join(resolve("."), ".tmp-debug-bridge-exit-test"); const classes = join(root, "classes");
+  const targetSource = join(root, "ExitingTarget.java");
+  mkdirSync(classes, { recursive: true }); writeFileSync(targetSource, EXITING_TARGET_SOURCE);
+  const compiled = spawnSync(javac, ["-g", "-d", classes, targetSource], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const target = spawn(java, ["-cp", classes, "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:0", "ExitingTarget"], { stdio: ["ignore", "pipe", "pipe"] });
+  let targetStderr = ""; target.stderr.on("data", chunk => { targetStderr += String(chunk); }); target.stdout.on("data", chunk => { targetStderr += String(chunk); });
+  const bridge = new Bridge(java);
+  t.after(() => { target.kill(); bridge.close(); rmSync(root, { recursive: true, force: true }); });
+  const listening = Date.now() + 30_000;
+  while (Date.now() < listening && !targetStderr.includes("Listening for transport dt_socket at address:")) await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
+  assert.ok(targetStderr.includes("Listening for transport dt_socket at address:"), targetStderr);
+  assert.ok(target.pid);
+  const [targetId] = (outputs.java_debug_targets.parse(await bridge.ok("targets", 30_000, "", "false")) as { targets: Array<{ targetId: string; pid: number }> }).targets.filter(entry => entry.pid === target.pid);
+  assert.ok(targetId, "launched target must be discovered as attachable");
+  const attached = outputs.java_debug_attach.parse(await bridge.ok("attach", 30_000, `local:${target.pid}`, "15000")) as { session: { sessionId: string; stopId?: string } };
+  const sessionId = attached.session.sessionId; const startupStop = String(attached.session.stopId);
+  const sessionState = async (): Promise<{ state: string; stopId?: string }> => {
+    const sessions = outputs.java_debug_sessions.parse(await bridge.ok("sessions", 30_000)) as { sessions: Array<{ sessionId: string; state: string; stopId?: string }> };
+    return sessions.sessions.find(session => session.sessionId === sessionId) as { state: string; stopId?: string };
+  };
+  // Arm the breakpoint while startup-suspended (the exiting target would otherwise run past it),
+  // then stop at the println without consuming the stop.
+  await bridge.ok("breakpoints", 30_000, sessionId, targetSource, "3", "10000");
+  await bridge.ok("execute", 30_000, sessionId, "continue", "", "", "0");
+  const hitDeadline = Date.now() + 30_000; let hit = await sessionState();
+  while (Date.now() < hitDeadline && !(hit.state === "stopped" && hit.stopId && hit.stopId !== startupStop)) { await new Promise(resolveDelay => setTimeout(resolveDelay, 50)); hit = await sessionState(); }
+  assert.equal(hit.state, "stopped"); assert.ok(hit.stopId && hit.stopId !== startupStop, "breakpoint stop must be current");
+  // Let main return so the VM exits while the breakpoint stop is still queued.
+  await bridge.ok("execute", 30_000, sessionId, "continue", String(hit.stopId), "", "0");
+  const deadDeadline = Date.now() + 30_000; let dead = await sessionState();
+  while (Date.now() < deadDeadline && dead.state !== "terminated") { await new Promise(resolveDelay => setTimeout(resolveDelay, 50)); dead = await sessionState(); }
+  assert.equal(dead.state, "terminated");
+  // The queued breakpoint stop must still validate as a stop even though the session has since terminated.
+  const queued = outputs.java_debug_wait_for_stop.parse(await bridge.ok("wait", 30_000, sessionId, "5000")) as { outcome: string; state?: string; stopId: string; reason: string };
+  assert.equal(queued.outcome, "stopped"); assert.equal(queued.state, "stopped"); assert.equal(queued.stopId, hit.stopId); assert.equal(queued.reason, "breakpoint");
+  // Executing against the dead target reports termination instead of failing on the stale stop.
+  const ended = outputs.java_debug_execute.parse(await bridge.ok("execute", 30_000, sessionId, "continue", "", "", "0")) as { outcome: string; state?: string };
+  assert.equal(ended.outcome, "terminated"); assert.equal(ended.state, "terminated");
+});

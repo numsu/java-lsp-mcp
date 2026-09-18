@@ -30,9 +30,9 @@ export const descriptions: Record<ToolName, string> = {
   java_debug_set_breakpoints: "Idempotently replace all source-line breakpoints for one workspace-relative Java source file. Requires an active sessionId from java_debug_attach or a debug test launch. Unloaded classes remain pending until class preparation.",
   java_debug_threads: "List target JVM threads and the current location of suspended threads. Requires an active sessionId from java_debug_attach or a debug test launch. System/infrastructure threads are omitted by default; packagePrefix matches the suspended thread's declaring class and namePattern is a full-match Java regular expression (an invalid pattern returns INVALID_PATTERN).",
   java_debug_wait_for_stop: "Wait for a breakpoint or step event with a bounded timeout. Requires an active sessionId from java_debug_attach or a debug test launch. A timeout is a normal outcome. Use the returned stopId for stack and variable inspection.",
-  java_debug_stack_trace: "Read a paginated stack trace for the thread suspended at the current stop. Requires an active sessionId from java_debug_attach or a debug test launch. Application frames are returned by default; use packagePrefix or includeInfrastructure to control filtering. Frame handles become stale as soon as execution resumes.",
-  java_debug_variables: "Read arguments, locals, this, or lazily expand an object/array value. Requires an active sessionId from java_debug_attach or a debug test launch. inlineFields shows important object fields; includeGetters is an explicit opt-in. Handles are scoped to stopId and become stale on resume.",
-  java_debug_execute: "Continue the target or step over, into, or out on the stopped thread. Requires an active sessionId from java_debug_attach or a debug test launch. A second request while a step/continue is active fails with a pending-request error; the response reports the active request. Step actions require the current stopId and threadId; waitTimeoutMs can atomically await the next stop.",
+  java_debug_stack_trace: "Read a paginated stack trace for the thread suspended at the current stop. Requires an active sessionId from java_debug_attach or a debug test launch. Omit stopId to use the current stop. Application frames are returned by default; use packagePrefix or includeInfrastructure to control filtering. Frame handles become stale as soon as execution resumes.",
+  java_debug_variables: "Read arguments, locals, this, or lazily expand an object/array value. Requires an active sessionId from java_debug_attach or a debug test launch. Omit stopId to use the current stop. inlineFields shows important object fields; includeGetters is an explicit opt-in. Handles are scoped to stopId and become stale on resume.",
+  java_debug_execute: "Continue the target or step over, into, or out on the stopped thread. Requires an active sessionId from java_debug_attach or a debug test launch. A second request while a step/continue is active fails with a pending-request error; the response reports the active request. Step actions require threadId and default to the current stop; pass stopId to detect a changed stop (STALE_STOP); waitTimeoutMs can atomically await the next stop.",
   java_debug_detach: "Detach this MCP debug session without terminating the target JVM. Any event-set suspension owned by the session is resumed first.",
   java_debug_hot_swap: "Compile selected workspace Java sources with ECJ and redefine their loaded classes through JDI Hot Code Replace. Requires an active sessionId from java_debug_attach or a debug test launch. Standard JVMs generally support method-body changes only; breakpoints are restored after replacement.",
 };
@@ -50,7 +50,12 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
       try {
         const parsed = inputs[name].parse(input) as ToolInput<N>;
         const value = await abortable(Promise.resolve(handler(parsed, context.mcpReq.signal)), context.mcpReq.signal);
-        const structuredContent = outputs[name].parse(enforceToolBudget(name, value, config.resultBudget)) as Record<string, unknown>;
+        let structuredContent: Record<string, unknown>;
+        try {
+          structuredContent = outputs[name].parse(enforceToolBudget(name, value, config.resultBudget)) as Record<string, unknown>;
+        } catch (error) {
+          throw outputValidationError(name, error, logger);
+        }
         const text = config.resultMode === "text" ? textResult(name, structuredContent) : summary(structuredContent);
         return { content: [{ type: "text" as const, text }], structuredContent };
       } catch (error) {
@@ -88,6 +93,11 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   register("java_debug_detach", i => debuggerService.detach(i));
   register("java_debug_hot_swap", (i, signal) => debuggerService.hotSwap(i, signal));
   return server;
+}
+
+export function outputValidationError(name: ToolName, error: unknown, logger: Logger): JavaLspMcpError {
+  if (error instanceof z.ZodError) logger.error(`${name} returned a result that failed output validation`, { issues: error.issues });
+  return new JavaLspMcpError("INTERNAL_ERROR", `${name} returned a result that failed output validation`);
 }
 
 export function describeTools(): object {

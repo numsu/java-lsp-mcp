@@ -64,6 +64,9 @@ test("debug tools enforce state handles and bounded waits", () => {
   assert.equal(inputs.java_debug_variables.parse({ sessionId: "s", stopId: "x", frameId: "f" }).limit, 50);
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into" }).success, false);
   assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into", threadId: 1, stopId: "x" }).success, true);
+  assert.equal(inputs.java_debug_execute.safeParse({ sessionId: "s", action: "step_into", threadId: 1 }).success, true);
+  assert.equal(inputs.java_debug_stack_trace.parse({ sessionId: "s", threadId: 1 }).stopId, undefined);
+  assert.equal(inputs.java_debug_variables.parse({ sessionId: "s", frameId: "f" }).stopId, undefined);
   assert.deepEqual(inputs.java_debug_threads.parse({ sessionId: "s" }), { sessionId: "s", includeSystemThreads: false });
   assert.deepEqual(inputs.java_debug_stack_trace.parse({ sessionId: "s", stopId: "x", threadId: 1 }), { sessionId: "s", stopId: "x", threadId: 1, startFrame: 0, maxFrames: 20, includeInfrastructure: false });
   const variables = inputs.java_debug_variables.parse({ sessionId: "s", stopId: "x", frameId: "f" });
