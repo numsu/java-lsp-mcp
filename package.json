@@ -1,6 +1,6 @@
 {
   "name": "java-lsp-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Java semantic intelligence MCP server backed by Eclipse JDT LS and ECJ",
   "type": "module",
   "packageManager": "npm@11.6.0",
