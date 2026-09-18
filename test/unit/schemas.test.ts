@@ -44,6 +44,12 @@ test("targeted tests default to incremental compilation and compact output", () 
   assert.equal(inputs.java_run_tests.safeParse({ path: "A.java", coverage: { limit: 201 } }).success, false);
   assert.equal(inputs.java_run_tests.safeParse({ tests: [{ path: "A.java", methodName: "a" }, { path: "B.java", methodName: "b" }] }).success, true);
   assert.equal(inputs.java_run_tests.safeParse({ path: "A.java", tests: [{ path: "B.java" }] }).success, false);
+  assert.equal(inputs.java_run_tests.safeParse({ className: "com.example.SomethingTest" }).success, true);
+  assert.equal(inputs.java_run_tests.safeParse({ methodName: "works" }).success, false);
+  assert.equal(inputs.java_run_tests.safeParse({}).success, false);
+  assert.equal(inputs.java_run_tests.safeParse({ tests: [{ className: "com.example.SomethingTest" }] }).success, true);
+  assert.equal(inputs.java_run_tests.safeParse({ tests: [{ methodName: "works" }] }).success, false);
+  assert.equal(inputs.java_run_tests.safeParse({ tests: [{ path: "A.java" }], className: "com.example.SomethingTest" }).success, false);
 });
 test("outline containment and read-only analyses have bounded defaults", () => {
   assert.equal(inputs.java_outline.parse({ path: "A.java", containingLine: 42 }).containingLine, 42);

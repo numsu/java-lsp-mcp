@@ -27,7 +27,7 @@ import { application } from "../version.js";
 
 const kinds = ["", "file", "module", "namespace", "package", "class", "method", "property", "field", "constructor", "enum", "interface", "function", "variable", "constant", "string", "number", "boolean", "array", "object", "key", "null", "enumMember", "struct", "event", "operator", "typeParameter"];
 const severities = ["", "error", "warning", "info", "hint"] as const;
-export interface TestSelectorInput { path: string; className?: string | undefined; methodName?: string | undefined }
+export interface TestSelectorInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined }
 interface CoverageInput { enabled: boolean; includes: string[]; details: "summary" | "files"; limit: number; includeTotal: boolean; cursor?: string | undefined }
 export interface TestInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined; tests?: TestSelectorInput[] | undefined; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; debug?: boolean | undefined; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface CachedTestRun extends JunitRunResult { coverage?: CoverageReport }
@@ -216,14 +216,15 @@ export class JavaService {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
     if (input.coverage) throw new JavaLspMcpError("DEBUG_COVERAGE_UNSUPPORTED", "Coverage is not supported for a suspended debug test launch; run the test normally with coverage after debugging");
     if (input.vmArgs.some(value => value.includes("jdwp") || value.includes("agentlib:jdwp"))) throw new JavaLspMcpError("DEBUG_VM_ARG_CONFLICT", "Do not pass JDWP arguments in vmArgs when debug=true; the server supplies suspend=y and a local ephemeral debug address");
-    const prepared = await this.prepareTestSelectors(input, signal, true);
+    const prepared = await this.prepareTestSelectors(input, signal);
     if (input.compile !== "none") await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs);
+    await this.assertTestSources(prepared, input.timeoutMs);
     const groups = await this.testGroups(prepared, input);
     const runtime = resolveTestRuntime(this.config);
     return [...groups.values()].map(group => this.testRunOptions(group, runtime, input, groups.size, undefined, true));
   }
   private async calculateTestRun(input: TestInput, signal?: AbortSignal): Promise<object> {
-    const prepared = await this.prepareTestSelectors(input, signal, !input.cursor && !input.coverage?.cursor);
+    const prepared = await this.prepareTestSelectors(input, signal);
     const query = { tool: "runTests", ...testQueryOf(input), hashes: prepared.map(item => [item.snapshot.path, item.snapshot.hash]) };
     const fp = fingerprint(query);
     let run: CachedTestRun;
@@ -237,6 +238,7 @@ export class JavaService {
         try { await this.ensureTestCompilation(input.compile === "clean", input.compileProjectOnly, prepared.map(item => item.snapshot.uri), input.timeoutMs); }
         catch (error) { return { status: "compile-failed", durationMs: Date.now() - started, counts: {}, failures: [], message: error instanceof Error ? error.message : String(error) }; }
       }
+      await this.assertTestSources(prepared, input.timeoutMs);
       if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
       const coverageRuntime = input.coverage?.enabled ? resolveCoverageRuntime() : undefined;
       const groups = await this.testGroups(prepared, input);
@@ -254,15 +256,30 @@ export class JavaService {
     }
     return { status: run.status, durationMs: run.durationMs, counts: run.counts, ...paged(page, "failures", input.includeTotal, run.failures.length), ...(run.message && { message: run.message }), ...(!input.cursor && !input.coverage?.cursor && run.output && { output: run.output }), ...(coverage && { coverage }) };
   }
-  private async prepareTestSelectors(input: TestInput, signal: AbortSignal | undefined, classify: boolean): Promise<PreparedTest[]> {
+  private async prepareTestSelectors(input: TestInput, signal: AbortSignal | undefined): Promise<PreparedTest[]> {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
     if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
-    const requested = input.tests ?? [{ path: input.path!, ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
-    const prepared = await Promise.all(requested.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path) })));
+    const requested: TestSelectorInput[] = input.tests ?? [{ ...(input.path && { path: input.path }), ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
+    const resolved = await Promise.all(requested.map(async selector => {
+      if (selector.path) return selector;
+      if (!selector.className) throw new JavaLspMcpError("INVALID_TEST_SELECTOR", "Test selector requires path or className");
+      return { ...selector, path: await this.resolveTestPath(selector.className) };
+    }));
+    const prepared = await Promise.all(resolved.map(async selector => ({ selector, snapshot: await this.prepareFile(selector.path!) })));
     const configuredExclusions = this.excludedProjectRoots(); if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`);
     if (prepared.some(item => configuredExclusions.roots.some(root => fileUriWithin(item.snapshot.uri, root)))) throw new JavaLspMcpError("TEST_PROJECT_EXCLUDED", "A selected test belongs to a project excluded at startup");
-    if (classify) { const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, input.timeoutMs))); const invalid = prepared.find((_, index) => !classifications[index]); if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source`); }
     return prepared;
+  }
+  private async resolveTestPath(className: string): Promise<string> {
+    const symbol = await this.resolveQualifiedSymbol(className);
+    const normalized = this.paths.fromUri(symbol.location.uri);
+    if (!normalized.editable) throw new JavaLspMcpError("DEPENDENCY_TARGET", `Test class ${className} resolved outside the workspace; pass its workspace-relative path explicitly`);
+    return normalized.path;
+  }
+  private async assertTestSources(prepared: PreparedTest[], timeoutMs: number): Promise<void> {
+    const classifications = await Promise.all(prepared.map(item => this.client.isTestFile(item.snapshot.uri, timeoutMs)));
+    const invalid = prepared.find((_, index) => !classifications[index]);
+    if (invalid) throw new JavaLspMcpError("NOT_A_TEST_FILE", `JDT does not classify ${invalid.snapshot.path} as a test source. If this is a test, ensure its module is imported as a Java project (Maven/Gradle sync), the file is under a test source root (e.g. src/test/java), the project builds successfully (java_compile), and it is not excluded via --exclude-project`);
   }
   private async testGroups(prepared: PreparedTest[], input: TestInput): Promise<Map<string, TestLaunchGroup>> {
     const launches = await Promise.all(prepared.map(async ({ selector, snapshot }) => {

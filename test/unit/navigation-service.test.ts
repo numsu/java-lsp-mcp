@@ -199,6 +199,46 @@ test("failed test compilation is not reused", async () => {
   assert.equal(builds, 2);
 });
 
+test("runTests resolves a className-only selector via JDT symbols", async () => {
+  const location = { uri: snapshot.uri, range: fieldRange };
+  const client = {
+    state: "ready", waitReady: async () => true,
+    symbols: async () => [{ name: "SomethingTest", containerName: "com.example", kind: 5, location }],
+    isTestFile: async () => true, build: async () => 1, diagnostics: { all: () => [] }, testClasspaths: async () => ({}),
+  } as unknown as LspClient;
+  const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
+  const request: TestInput = { className: "com.example.SomethingTest", compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  await assert.rejects(service.runTests(request), /no test runtime classpath/u);
+});
+
+test("runTests rejects an ambiguous className-only selector with a path hint", async () => {
+  const client = {
+    state: "ready", waitReady: async () => true,
+    symbols: async () => [
+      { name: "SomethingTest", containerName: "com.example", kind: 5, location: { uri: "file:///workspace/a/src/test/SomethingTest.java", range: fieldRange } },
+      { name: "SomethingTest", containerName: "com.example", kind: 5, location: { uri: "file:///workspace/b/src/test/SomethingTest.java", range: fieldRange } },
+    ],
+    isTestFile: async () => true, build: async () => 1, diagnostics: { all: () => [] }, testClasspaths: async () => ({}),
+  } as unknown as LspClient;
+  const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
+  const request: TestInput = { className: "com.example.SomethingTest", compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  await assert.rejects(service.runTests(request), /ambiguous|source position/ui);
+});
+
+test("runTests compiles before the JDT test-source gate and explains a negative classification", async () => {
+  const order: string[] = [];
+  const client = {
+    state: "ready", waitReady: async () => true,
+    build: async () => { order.push("build"); return 1; }, diagnostics: { all: () => [] },
+    isTestFile: async () => { order.push("classify"); return false; },
+  } as unknown as LspClient;
+  const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
+  const error = await service.runTests(testRequest(snapshot.path, false)).catch(error => error);
+  assert.match(String(error?.message ?? error), /test source root/u);
+  assert.equal(error?.code, "NOT_A_TEST_FILE");
+  assert.deepEqual(order, ["build", "classify"]);
+});
+
 test("unused-code analysis closes documents that it opened", async () => {
   let closes = 0;
   const client = { state: "ready", waitReady: async () => true, isDocumentOpen: () => false, extendedOutline: async () => outline, closeDocument: async () => { closes++; } } as unknown as LspClient;
