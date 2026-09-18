@@ -59,7 +59,6 @@ Flags for `serve` (a `java-lsp-mcp.json` or `java-lsp-mcp.toml` file in the work
 | `--offline` | Never touch the network; Maven/Gradle resolve from caches only. |
 | `--exclude-project` | Leave a module out of import, compilation, and tests (repeatable). |
 | `--test-classpath-entry` | Extra directory or jar on the test runtime classpath (repeatable). |
-| `--jdtls-home` | Use your own JDT Language Server instead of the bundled one. |
 | `--source-encoding` | Override file-encoding detection when the project has no Eclipse settings. |
 | `--timeout`, `--result-budget` | Shared operation timeout in ms and per-result output budget in bytes. |
 | `--log-level`, `--max-heap`, `--result-mode` | Operational tuning; all logs go to stderr, never stdout. |

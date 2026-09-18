@@ -8,7 +8,7 @@ import { LATEST_KNOWN_MODERN } from "../../src/mcp/handshake.js";
 
 const meta = { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "test", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} };
 function start(): { child: ChildProcessWithoutNullStreams; next: () => Promise<Record<string, unknown>> } {
-  const child = spawn(process.execPath, [resolve("dist/server.mjs"), "serve", "--workspace", resolve("test/fixtures/unmanaged"), "--tooling-jdk", resolve("missing-jdk"), "--jdtls-home", resolve("missing-jdtls"), "--timeout", "25"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, JAVA_LSP_MCP_CACHE_DIR: resolve(".runtime/test-cache") } });
+  const child = spawn(process.execPath, [resolve("dist/server.mjs"), "serve", "--workspace", resolve("test/fixtures/unmanaged"), "--tooling-jdk", resolve("missing-jdk"), "--timeout", "25"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, JAVA_LSP_MCP_CACHE_DIR: resolve(".runtime/test-cache") } });
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
   return { child, next: async () => JSON.parse((await lines.next()).value as string) as Record<string, unknown> };
 }
@@ -20,7 +20,7 @@ test("modern stdio discovery and static tools list", async () => {
   } finally { child.kill(); }
 });
 async function handshakeOnce(message: object): Promise<{ response: Record<string, unknown>; stderr: string }> {
-  const child = spawn(process.execPath, [resolve("dist/server.mjs"), "serve", "--workspace", resolve("test/fixtures/unmanaged"), "--tooling-jdk", resolve("missing-jdk"), "--jdtls-home", resolve("missing-jdtls"), "--timeout", "25"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, JAVA_LSP_MCP_CACHE_DIR: resolve(".runtime/test-cache") } });
+  const child = spawn(process.execPath, [resolve("dist/server.mjs"), "serve", "--workspace", resolve("test/fixtures/unmanaged"), "--tooling-jdk", resolve("missing-jdk"), "--timeout", "25"], { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, JAVA_LSP_MCP_CACHE_DIR: resolve(".runtime/test-cache") } });
   let stderr = "";
   child.stderr.on("data", chunk => { stderr += String(chunk); });
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();

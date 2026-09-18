@@ -13,7 +13,7 @@ import type { WorkspaceSynchronizer } from "../../src/workspace/watcher.js";
 test("real JDT LS starts with ECJ configuration", { skip: !process.env.JAVA_LSP_MCP_INTEGRATION }, async () => {
   process.env.JAVA_LSP_MCP_CACHE_DIR = resolve(".runtime/cache");
   if (!process.env.JAVA_HOME) throw new Error("JAVA_HOME must point to an external JDK for integration tests");
-  const workspace = resolve("test/fixtures/unmanaged"); const config = loadConfig(workspace, { trustWorkspace: true, toolingJdk: process.env.JAVA_HOME, jdtlsHome: resolve(".runtime/jdtls"), timeoutMs: 120_000 }); const supervisor = new JdtSupervisor(config, new Logger("error"));
+  const workspace = resolve("test/fixtures/unmanaged"); const config = loadConfig(workspace, { trustWorkspace: true, toolingJdk: process.env.JAVA_HOME, timeoutMs: 120_000 }); const supervisor = new JdtSupervisor(config, new Logger("error"));
   const source = resolve(workspace, "src/Overloads.java"); const before = await readFile(source, "utf8");
   try {
     await supervisor.start(); assert.equal(await supervisor.client.waitReady(120_000), true); assert.notEqual(supervisor.client.serverVersion, "unknown");
@@ -52,7 +52,7 @@ test("real JDT LS starts with ECJ configuration", { skip: !process.env.JAVA_LSP_
 test("real JDT LS selectively imports Maven modules excluded at startup", { skip: !process.env.JAVA_LSP_MCP_INTEGRATION }, async () => {
   process.env.JAVA_LSP_MCP_CACHE_DIR = resolve(".runtime/cache");
   if (!process.env.JAVA_HOME) throw new Error("JAVA_HOME must point to an external JDK for integration tests");
-  const workspace = resolve("test/fixtures/selective-maven"); const config = loadConfig(workspace, { trustWorkspace: true, toolingJdk: process.env.JAVA_HOME, jdtlsHome: resolve(".runtime/jdtls"), excludedProjects: ["excluded"], timeoutMs: 120_000 }); const supervisor = new JdtSupervisor(config, new Logger("error"));
+  const workspace = resolve("test/fixtures/selective-maven"); const config = loadConfig(workspace, { trustWorkspace: true, toolingJdk: process.env.JAVA_HOME, excludedProjects: ["excluded"], timeoutMs: 120_000 }); const supervisor = new JdtSupervisor(config, new Logger("error"));
   try {
     await supervisor.start(); assert.equal(await supervisor.client.waitReady(120_000), true); const projects = await supervisor.client.projects(30_000);
     assert.ok(projects.some(uri => /\/included\/?$/u.test(new URL(uri).pathname)), JSON.stringify(projects)); assert.ok(!projects.some(uri => /\/excluded\/?$/u.test(new URL(uri).pathname)), JSON.stringify(projects));

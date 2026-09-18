@@ -9,7 +9,6 @@ export interface Config {
   trustWorkspace: boolean;
   maxHeap: string;
   toolingJdk?: string;
-  jdtlsHome?: string;
   projectJdk?: string;
   resultMode: "structured" | "text";
   logLevel: LogLevel;
@@ -31,7 +30,6 @@ const configSchema = z.object({
   trustWorkspace: z.boolean(),
   maxHeap: z.string().min(1),
   toolingJdk: z.string().min(1).optional(),
-  jdtlsHome: z.string().min(1).optional(),
   projectJdk: z.string().min(1).optional(),
   resultMode: z.enum(["structured", "text"]),
   logLevel: z.enum(["error", "warn", "info", "debug"]),
@@ -59,7 +57,6 @@ export function loadConfig(workspace: string, cli: Partial<Config>): Config {
     ...(trustWorkspace !== undefined && { trustWorkspace }),
     ...(process.env.JAVA_LSP_MCP_MAX_HEAP && { maxHeap: process.env.JAVA_LSP_MCP_MAX_HEAP }),
     ...(process.env.JAVA_LSP_MCP_TOOLING_JDK && { toolingJdk: process.env.JAVA_LSP_MCP_TOOLING_JDK }),
-    ...(process.env.JAVA_LSP_MCP_JDTLS_HOME && { jdtlsHome: process.env.JAVA_LSP_MCP_JDTLS_HOME }),
     ...(process.env.JAVA_LSP_MCP_PROJECT_JDK && { projectJdk: process.env.JAVA_LSP_MCP_PROJECT_JDK }),
     ...(process.env.JAVA_LSP_MCP_SOURCE_ENCODING && { sourceEncoding: process.env.JAVA_LSP_MCP_SOURCE_ENCODING }),
     ...(process.env.JAVA_LSP_MCP_RESULT_MODE && { resultMode: process.env.JAVA_LSP_MCP_RESULT_MODE as Config["resultMode"] }),

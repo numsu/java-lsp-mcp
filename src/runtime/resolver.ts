@@ -18,16 +18,17 @@ export function jdkExecutionEnvironment(jdk: string): string {
 }
 export function workspaceCacheDirectory(config: Config): string {
   const exclusions = [...(config.excludedProjects ?? [])].sort().join("\0");
-  const runtime = config.jdtlsHome ?? `bundled-${application.jdtlsVersion}`;
+  const runtime = `bundled-${application.jdtlsVersion}`;
   const key = createHash("sha256").update(`selective-import-v2\0${config.workspace}\0${runtime}\0${config.trustWorkspace}\0${config.sourceEncoding ?? "project-default"}\0${exclusions}`).digest("hex").slice(0, 24);
   const cache = process.env.JAVA_LSP_MCP_CACHE_DIR ?? process.env.LOCALAPPDATA ?? process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache");
   return join(cache, application.name, "workspaces", key);
 }
 export function defaultJdtlsHome(): string {
-  // In both development (`dist/server.mjs`) and packaged releases
-  // (`app/server.mjs`), the application root is the bundle's parent.
+  // Packaged releases (`app/server.mjs`) carry runtime/jdtls next to the app;
+  // development builds fall back to the fetch-runtime default output.
   const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  return join(appRoot, "runtime", "jdtls");
+  const packaged = join(appRoot, "runtime", "jdtls");
+  return existsSync(join(packaged, "plugins")) ? packaged : resolve(".runtime", "jdtls");
 }
 export function resolveRuntime(config: Config): RuntimePaths {
   const jdk = config.toolingJdk ?? process.env.JAVA_HOME;
@@ -36,14 +37,14 @@ export function resolveRuntime(config: Config): RuntimePaths {
       hint: "Set JAVA_HOME to a JDK installation or use --tooling-jdk/JAVA_LSP_MCP_TOOLING_JDK",
     });
   }
-  const jdtlsHome = config.jdtlsHome ?? defaultJdtlsHome();
+  const jdtlsHome = defaultJdtlsHome();
   const java = join(jdk, "bin", process.platform === "win32" ? "java.exe" : "java");
   const platform = process.platform === "win32" ? "win" : process.platform === "darwin" ? "mac" : "linux";
   const configuration = join(jdtlsHome, `config_${platform}`);
   const locked = readLauncher(jdtlsHome);
   const launcher = join(jdtlsHome, "plugins", locked);
   for (const [name, value] of Object.entries({ java, jdtlsHome, launcher, configuration })) {
-    if (!existsSync(value)) throw new JavaLspMcpError("RUNTIME_MISSING", `${name} not found: ${value}`, { hint: name === "java" ? "Set JAVA_HOME to a valid JDK or use --tooling-jdk" : "Run java-lsp-mcp fetch-runtime or use --jdtls-home" });
+    if (!existsSync(value)) throw new JavaLspMcpError("RUNTIME_MISSING", `${name} not found: ${value}`, { hint: name === "java" ? "Set JAVA_HOME to a valid JDK or use --tooling-jdk" : "Run java-lsp-mcp fetch-runtime or rebuild the release" });
   }
   return { java, jdtlsHome, launcher, configuration };
 }

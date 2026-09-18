@@ -45,6 +45,20 @@ test("a unique method search can include its complete implementation range", asy
   assert.deepEqual(result.symbols[0], { name: "getYTunnus", kind: "method", container: "Company", path: snapshot.path, startLine: 2, endLine: 4, implementation: "  String getYTunnus() {\n    return \"löytyi\";\n  }" });
 });
 
+test("implementation lookup tolerates a signature in the workspace symbol name", async () => {
+  const content = ["class Company {", "  String getYTunnus() {", "    return \"löytyi\";", "  }", "}"].join("\n");
+  const snapshot: Snapshot = { path: "src/Company.java", uri: "file:///workspace/src/Company.java", content, hash: "hash", version: 1, mtimeMs: 1 };
+  const methodRange = { start: { line: 1, character: 2 }, end: { line: 3, character: 3 } }; const selectionRange = { start: { line: 1, character: 9 }, end: { line: 1, character: 19 } };
+  const symbol = { name: "getYTunnus(java.lang.String)", kind: 6, containerName: "Company", location: { uri: snapshot.uri, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 1 } } } };
+  const client = { state: "ready", waitReady: async () => true, symbols: async () => [symbol], extendedOutline: async () => [{ name: "Company", kind: 5, range: { start: { line: 0, character: 0 }, end: { line: 4, character: 1 } }, selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } }, children: [{ name: "getYTunnus()", kind: 6, range: methodRange, selectionRange }] }] } as unknown as LspClient;
+  const paths = { fromUri: () => ({ path: snapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
+  const sync = { indexGeneration: 1, flush: async () => {}, verify: async () => snapshot } as unknown as WorkspaceSynchronizer;
+  const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
+  const result = await new JavaService(config, paths, sync, client).search({ query: "getYTunnus", scope: "workspace", mode: "exact", kinds: ["method"], includeImplementation: true, limit: 50, includeTotal: false }) as { symbols: Array<Record<string, unknown>> };
+  assert.equal(result.symbols[0]?.startLine, 2); assert.equal(result.symbols[0]?.endLine, 4);
+  assert.match(String(result.symbols[0]?.implementation), /return "löytyi";/u);
+});
+
 test("a unique class search includes at most 200 source lines", async () => {
   const content = ["class Large {", ...Array.from({ length: 203 }, (_, index) => `  int field${index};`), "}"].join("\n");
   const snapshot: Snapshot = { path: "src/Large.java", uri: "file:///workspace/src/Large.java", content, hash: "hash", version: 1, mtimeMs: 1 };
@@ -66,6 +80,19 @@ test("implementation is omitted when the filtered search is ambiguous", async ()
   const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
   const result = await new JavaService(config, paths, sync, client).search({ query: "find", scope: "workspace", mode: "exact", includeImplementation: true, limit: 1, includeTotal: true }) as { symbols: Array<Record<string, unknown>>; total: number };
   assert.equal(result.total, 2); assert.equal(result.symbols.length, 1); assert.equal("implementation" in result.symbols[0]!, false);
+});
+
+test("exact method search tolerates signatures in indexed names", async () => {
+  let query = "";
+  const location = { uri: "file:///workspace/src/A.java", range: { start: { line: 1, character: 2 }, end: { line: 1, character: 6 } } };
+  const client = { state: "ready", waitReady: async () => true, symbols: async (value: string) => { query = value; return [{ name: "work(java.lang.String)", kind: 6, containerName: "com.example.A", location }]; } } as unknown as LspClient;
+  const paths = { fromUri: () => ({ path: "src/A.java", origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
+  const sync = { indexGeneration: 1, flush: async () => {} } as unknown as WorkspaceSynchronizer;
+  const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
+  const result = await new JavaService(config, paths, sync, client).search({ query: "work", scope: "workspace", mode: "exact", kinds: ["method"], includeImplementation: false, limit: 50, includeTotal: true }) as { symbols: Array<Record<string, unknown>>; total: number };
+  assert.equal(query, "work");
+  assert.equal(result.total, 1);
+  assert.equal(result.symbols[0]?.name, "work(java.lang.String)");
 });
 
 test("exact and prefix searches include workspace enum constants", async () => {

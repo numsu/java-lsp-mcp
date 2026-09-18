@@ -39,6 +39,9 @@ test("additional test classpath entries fail explicitly when a path is missing",
 test("symbol search modes have distinct matching semantics", () => {
   assert.equal(symbolNameMatches("getYTunnus", "getYTunnus", "exact"), true);
   assert.equal(symbolNameMatches("getYTunnusValue", "getYTunnus", "exact"), false);
+  assert.equal(symbolNameMatches("work(java.lang.String)", "work", "exact"), true);
+  assert.equal(symbolNameMatches("work", "work(java.lang.String)", "exact"), true);
+  assert.equal(symbolNameMatches("work(String)", "work(Integer)", "exact"), true);
   assert.equal(symbolNameMatches("getYTunnusValue", "getYTunnus", "prefix"), true);
   assert.equal(symbolNameMatches("getYTunnus", "gYT", "camelCase"), true);
   assert.equal(symbolNameMatches("forgetYourTunnus", "gYT", "camelCase"), false);

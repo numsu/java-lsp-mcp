@@ -670,7 +670,7 @@ export class JavaService {
     const symbol = await this.resolveQualifiedSymbol(target.qualifiedName); const normalized = this.paths.fromUri(symbol.location.uri); if (!normalized.editable) throw new JavaLspMcpError("DEPENDENCY_TARGET", "Qualified dependency targets require a source position"); const snapshot = await this.prepareFile(normalized.path); return { snapshot, position: symbol.location.range.start };
   }
   private async resolveQualifiedSymbol(qualifiedName: string): Promise<SymbolInformation> {
-    await this.prepare(); const base = qualifiedName.replace(/\(.*$/u, ""); const query = base.split(/[.#]/u).filter(Boolean).at(-1)!; const candidates = await this.client.symbols(query, this.config.timeoutMs);
+    await this.prepare(); const base = stripSignature(qualifiedName); const query = base.split(/[.#]/u).filter(Boolean).at(-1)!; const candidates = await this.client.symbols(query, this.config.timeoutMs);
     const exact = candidates.filter(symbol => qualifiedMatches(qualifiedName, symbol, false));
     const relaxed = exact.length ? exact : candidates.filter(symbol => qualifiedMatches(qualifiedName, symbol, true));
     const matches = [...new Map(relaxed.map(symbol => [symbolLocationKey(symbol), symbol])).values()];
@@ -686,7 +686,7 @@ export class JavaService {
     if (!target.editable) return base;
     const snapshot = await this.sync.verify(target.path); const outline = await this.documentOutline(snapshot, this.config.timeoutMs);
     const located = symbolAtPosition(outline, symbol.location.range.start.line, symbol.location.range.start.character)?.symbol;
-    const declaration = located && (kinds[located.kind] ?? "") === kind ? located : flattenSymbols(outline).find(item => (kinds[item.kind] ?? "") === kind && item.selectionRange.start.line === symbol.location.range.start.line && item.name.replace(/\(.*$/u, "") === symbol.name);
+    const declaration = located && (kinds[located.kind] ?? "") === kind ? located : flattenSymbols(outline).find(item => (kinds[item.kind] ?? "") === kind && item.selectionRange.start.line === symbol.location.range.start.line && stripSignature(item.name) === stripSignature(symbol.name));
     const source = lines(snapshot.content); const range = declaration?.range ?? { start: { line: symbol.location.range.start.line, character: 0 }, end: { line: symbol.location.range.end.line, character: source[symbol.location.range.end.line]?.length ?? symbol.location.range.end.character } };
     const implementation = sourceRange(snapshot.content, range.start.line, range.end.line, range.end.character); const implementationLines = lines(implementation); const lineLimited = implementationLines.slice(0, 200).join("\n"); const lineTruncated = implementationLines.length > 200; const startLine = range.start.line + 1; const endLine = range.end.line + 1; const { line: _line, ...declarationBase } = base as Record<string, unknown>;
     const empty = { ...declarationBase, startLine, endLine, implementation: "" }; const allowance = Math.max(256, this.config.resultBudget - Buffer.byteLength(JSON.stringify({ symbols: [empty] }), "utf8") - 512); const selected = truncateUtf8(lineLimited, allowance);
@@ -697,8 +697,8 @@ export class JavaService {
 function itemKey(item: HierarchyItem): string { return `${item.uri}:${item.range.start.line}:${item.range.start.character}:${item.name}`; }
 function symbolLocationKey(symbol: SymbolInformation): string { const start = symbol.location.range.start; return `${symbol.location.uri}:${start.line}:${start.character}:${symbol.kind}`; }
 function qualifiedMatches(q: string, s: SymbolInformation, relaxed: boolean): boolean {
-  const base = q.replace(/\(.*$/u, ""); const name = base.split(/[.#]/u).at(-1);
-  const symbolName = s.name.replace(/\(.*$/u, "");
+  const base = stripSignature(q); const name = base.split(/[.#]/u).at(-1);
+  const symbolName = stripSignature(s.name);
   if (symbolName !== name) return false;
   if (!base.includes(".") && !base.includes("#")) return true;
   const wanted = base.replace("#", "."); const candidate = `${s.containerName ?? ""}.${symbolName}`;
@@ -710,13 +710,15 @@ function severityNameRank(name: string): number { return Math.max(1, severities.
 function buildStatusName(status: number): "failed" | "succeeded" | "with-errors" | "cancelled" | "unknown" { return (["failed", "succeeded", "with-errors", "cancelled"] as const)[status] ?? "unknown"; }
 function prerequisiteProjectName(message: string): string | undefined { return /^The project cannot be built until its prerequisite (.+) is built\.(?: |$)/u.exec(message)?.[1]?.trim(); }
 function projectUriName(uri: string): string { try { return basename(fileURLToPath(uri)); } catch { return ""; } }
+function stripSignature(name: string): string { return name.replace(/\(.*$/u, ""); }
 function jdtSymbolQuery(query: string, mode: string): string {
+  if (mode === "exact") return stripSignature(query);
   if (mode === "prefix") return `${query}*`;
   if (mode === "fuzzy") return `*${[...query].join("*")}*`;
   return query;
 }
 export function symbolNameMatches(name: string, query: string, mode: string): boolean {
-  if (mode === "exact") return name === query;
+  if (mode === "exact") return stripSignature(name) === stripSignature(query);
   if (mode === "prefix") return name.startsWith(query);
   if (mode === "fuzzy") return subsequenceMatches(name, query, false);
   return name.startsWith(query) || subsequenceMatches(name, query, true);
