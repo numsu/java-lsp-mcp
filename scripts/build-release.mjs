@@ -19,9 +19,10 @@ await cp("dist/runtime/debug", join(bundle, "runtime", "debug"), { recursive: tr
 await cp("third_party/notices/THIRD_PARTY_NOTICES.md", join(bundle, "licenses", "THIRD_PARTY_NOTICES.md"));
 await cp("README.md", join(bundle, "README.txt"));
 await cp("runtime/versions.lock.json", join(bundle, "manifest.json"));
-await writeFile(join(bundle, "bin", "java-lsp-mcp"), '#!/bin/sh\nd="$0"\ncase $d in */*) d=${d%/*};; esac\nD="$(CDPATH= cd -- "$d/.." && pwd)"\nexec "$D/runtime/node/bin/node" "$D/app/server.mjs" "$@"\n');
+// Node.js is an external prerequisite: the launchers use the system node from PATH.
+await writeFile(join(bundle, "bin", "java-lsp-mcp"), '#!/bin/sh\nd="$0"\ncase $d in */*) d=${d%/*};; esac\nD="$(CDPATH= cd -- "$d/.." && pwd)"\nexec node "$D/app/server.mjs" "$@"\n');
 await chmod(join(bundle, "bin", "java-lsp-mcp"), 0o755);
-await writeFile(join(bundle, "bin", "java-lsp-mcp.cmd"), '@echo off\r\nset "D=%~dp0.."\r\n"%D%\\runtime\\node\\node.exe" "%D%\\app\\server.mjs" %*\r\n');
+await writeFile(join(bundle, "bin", "java-lsp-mcp.cmd"), '@echo off\r\nset "D=%~dp0.."\r\nnode "%D%\\app\\server.mjs" %*\r\n');
 
 const windows = platform.startsWith("windows-");
 const finalArchive = `${finalRoot}${windows ? ".zip" : ".tar.gz"}`;
@@ -42,18 +43,19 @@ try {
   await rename(stageRoot, finalRoot);
 } catch (error) {
   if (error?.code !== "EPERM" && error?.code !== "EBUSY") throw error;
-  // Windows cannot replace a running bundled node.exe. Refresh application
+  // Files held open by a running process cannot be replaced. Refresh application
   // files in place and retain an already-installed runtime until VS Code stops.
   await mkdir(join(finalRoot, "java-lsp-mcp"), { recursive: true });
   for (const name of ["app", "bin", "licenses", "README.txt", "manifest.json"]) {
     await rm(join(finalRoot, "java-lsp-mcp", name), { recursive: true, force: true });
     await cp(join(bundle, name), join(finalRoot, "java-lsp-mcp", name), { recursive: true });
   }
-  for (const name of ["node", "jdtls", "junit-console", "jacoco", "debug"]) {
+  for (const name of ["jdtls", "junit-console", "jacoco", "debug"]) {
     const destination = join(finalRoot, "java-lsp-mcp", "runtime", name);
     if (!await exists(destination)) await cp(join(bundle, "runtime", name), destination, { recursive: true });
   }
-  // Remove JDKs left by releases from before Java became an external prerequisite.
+  // Remove runtimes left by releases from before they became external prerequisites.
+  await rm(join(finalRoot, "java-lsp-mcp", "runtime", "node"), { recursive: true, force: true });
   await rm(join(finalRoot, "java-lsp-mcp", "runtime", "jdk"), { recursive: true, force: true });
   await rm(stageRoot, { recursive: true, force: true });
   process.stderr.write("[java-lsp-mcp] updated application files at stable path; retained runtime files held open by a running process\n");

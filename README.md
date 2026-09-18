@@ -15,7 +15,7 @@ Java semantic intelligence for Model Context Protocol (MCP) clients, powered by 
 
 ## Requirements
 
-Release archives bundle Node.js and JDT LS; provide a JDK through `JAVA_HOME` or `--tooling-jdk`. Source builds require Node.js 24 and npm.
+Release archives bundle JDT LS, JUnit, and JaCoCo; provide Node.js 24+ and a JDK through `JAVA_HOME` or `--tooling-jdk`. Source builds require Node.js 24 and npm.
 
 ## Quick start
 

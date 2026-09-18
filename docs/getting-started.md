@@ -2,7 +2,7 @@
 
 `java-lsp-mcp` exposes JDT and ECJ over MCP stdio, keeps logs on stderr, and returns edit previews instead of modifying Java files. It supports MCP `2026-07-28` and the `2025-11-25` compatibility handshake.
 
-Release archives bundle the app, Node.js, JDT LS, JUnit, and JaCoCo, but not a JDK. Set `JAVA_HOME` or `--tooling-jdk`. Archives target Windows, macOS, and Linux on x64 and arm64.
+Release archives bundle the app, JDT LS, JUnit, and JaCoCo, but neither a JDK nor Node.js. Both are prerequisites: install Node.js 24+ (the release launchers use `node` from `PATH`) and set `JAVA_HOME` or `--tooling-jdk`. Archives target Windows, macOS, and Linux on x64 and arm64.
 
 Build from source with `npm ci`, `npm run fetch-runtime`, and `npm run check`. Use `bin/java-lsp-mcp` or Windows `bin\java-lsp-mcp.cmd`.
 

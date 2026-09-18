@@ -8,8 +8,8 @@ import { execFileSync } from "node:child_process";
 
 const args = parseArgs(process.argv.slice(2));
 const platform = String(args.platform ?? hostPlatform()); const output = resolve(String(args.output ?? ".runtime")); const cache = resolve(String(args.cache ?? join(output, "downloads"))); const lock = JSON.parse(await readFile(new URL("../runtime/versions.lock.json", import.meta.url), "utf8"));
-// Java is an external prerequisite. Only application-owned runtimes belong here.
-for (const name of ["node", "jdtls", "junit-console", "jacoco"]) {
+// Node.js and Java are external prerequisites. Only application-owned runtimes belong here.
+for (const name of ["jdtls", "junit-console", "jacoco"]) {
   const artifact = lock.components[name].artifacts[platform] ?? lock.components[name].artifacts.all;
   if (!artifact) throw new Error(`${name} is unavailable for ${platform}`);
   const archive = join(cache, basename(new URL(artifact.url).pathname)); await mkdir(cache, { recursive: true });
