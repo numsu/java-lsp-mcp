@@ -670,9 +670,11 @@ export class JavaService {
     const symbol = await this.resolveQualifiedSymbol(target.qualifiedName); const normalized = this.paths.fromUri(symbol.location.uri); if (!normalized.editable) throw new JavaLspMcpError("DEPENDENCY_TARGET", "Qualified dependency targets require a source position"); const snapshot = await this.prepareFile(normalized.path); return { snapshot, position: symbol.location.range.start };
   }
   private async resolveQualifiedSymbol(qualifiedName: string): Promise<SymbolInformation> {
-    await this.prepare(); const base = qualifiedName.replace(/\(.*$/u, ""); const query = base.split(/[.#]/u).filter(Boolean).at(-1)!; const candidates = (await this.client.symbols(query, this.config.timeoutMs)).filter(symbol => qualifiedMatches(qualifiedName, symbol));
-    const matches = [...new Map(candidates.map(symbol => [symbolLocationKey(symbol), symbol])).values()];
-    if (!matches.length) throw new JavaLspMcpError("SYMBOL_NOT_FOUND", `Qualified symbol not found: ${qualifiedName}`);
+    await this.prepare(); const base = qualifiedName.replace(/\(.*$/u, ""); const query = base.split(/[.#]/u).filter(Boolean).at(-1)!; const candidates = await this.client.symbols(query, this.config.timeoutMs);
+    const exact = candidates.filter(symbol => qualifiedMatches(qualifiedName, symbol, false));
+    const relaxed = exact.length ? exact : candidates.filter(symbol => qualifiedMatches(qualifiedName, symbol, true));
+    const matches = [...new Map(relaxed.map(symbol => [symbolLocationKey(symbol), symbol])).values()];
+    if (!matches.length) throw new JavaLspMcpError("SYMBOL_NOT_FOUND", `Qualified symbol not found: ${qualifiedName}. Use java_search_symbols to see indexed names, or a source position target`);
     if (matches.length > 1) throw new JavaLspMcpError("AMBIGUOUS_SYMBOL", `Qualified symbol is ambiguous; use a source position: ${qualifiedName}`);
     return matches[0]!;
   }
@@ -694,10 +696,13 @@ export class JavaService {
 }
 function itemKey(item: HierarchyItem): string { return `${item.uri}:${item.range.start.line}:${item.range.start.character}:${item.name}`; }
 function symbolLocationKey(symbol: SymbolInformation): string { const start = symbol.location.range.start; return `${symbol.location.uri}:${start.line}:${start.character}:${symbol.kind}`; }
-function qualifiedMatches(q: string, s: SymbolInformation): boolean {
+function qualifiedMatches(q: string, s: SymbolInformation, relaxed: boolean): boolean {
   const base = q.replace(/\(.*$/u, ""); const name = base.split(/[.#]/u).at(-1);
-  if (!base.includes(".") && !base.includes("#")) return s.name === name;
-  return `${s.containerName ?? ""}.${s.name}` === base.replace("#", ".");
+  const symbolName = s.name.replace(/\(.*$/u, "");
+  if (symbolName !== name) return false;
+  if (!base.includes(".") && !base.includes("#")) return true;
+  const wanted = base.replace("#", "."); const candidate = `${s.containerName ?? ""}.${symbolName}`;
+  return relaxed ? wanted === candidate || wanted.endsWith(`.${candidate}`) : wanted === candidate;
 }
 function hoverText(value: unknown): string { if (!value || typeof value !== "object") return ""; const contents = (value as { contents?: unknown }).contents; if (typeof contents === "string") return contents; if (Array.isArray(contents)) return contents.map(hoverText).join("\n"); if (contents && typeof contents === "object" && "value" in contents) return String((contents as { value: unknown }).value); return ""; }
 function severityRank(d: Diagnostic): number { return d.severity ?? 3; }
