@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -211,6 +211,72 @@ export class JavaService {
   }
   async runTests(input: TestInput, signal?: AbortSignal): Promise<object> {
     return this.calculateTestRun(input, signal);
+  }
+  async updateProjects(input: { paths?: string[] | undefined; all: boolean; force: boolean; timeoutMs: number }, signal?: AbortSignal): Promise<object> {
+    if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Updating project configuration executes workspace build logic", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
+    if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
+    const started = Date.now();
+    const deadline = operationalDeadline(input.timeoutMs);
+    if (input.force) {
+      await this.client.importProjects(remaining(deadline));
+      if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
+      this.sync.indexGeneration++;
+      const imported = await this.client.projects(remaining(deadline)).catch(() => [] as string[]);
+      const listed: Array<{ path: string; updated: boolean }> = [];
+      const seen = new Set<string>();
+      for (const uri of imported) {
+        const normalized = this.paths.fromUri(uri);
+        if (!normalized.editable || seen.has(normalized.path)) continue;
+        let relativePath = normalized.path;
+        try {
+          const descriptor = findBuildDescriptor(this.paths.resolve(normalized.path), this.paths.root);
+          if (descriptor) relativePath = this.paths.relative(descriptor);
+        } catch { /* report the project path when it cannot be resolved */ }
+        if (seen.has(relativePath)) continue; seen.add(relativePath);
+        listed.push({ path: relativePath, updated: true });
+      }
+      const ready = await this.client.waitReady(remaining(deadline)).catch(() => false);
+      return { projects: listed, durationMs: Date.now() - started, ready, ...(!ready && { message: "JDT is still importing; observe readiness with java_status {\"waitForReady\":true}" }) };
+    }
+    const targets = await this.resolveUpdateTargets(input.paths, input.all);
+    const results: Array<{ path: string; updated: boolean; message?: string }> = [];
+    for (const target of targets) {
+      if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
+      if (target.excluded) { results.push({ path: target.path, updated: false, message: "Project is excluded at startup via --exclude-project" }); continue; }
+      if (target.missing) { results.push({ path: target.path, updated: false, message: `Path does not exist: ${target.path}` }); continue; }
+      try { await this.client.updateProjectConfiguration(target.uri, remaining(deadline)); results.push({ path: target.path, updated: true }); }
+      catch (error) { results.push({ path: target.path, updated: false, message: unimportedProjectHint(error) }); }
+    }
+    if (!results.length) return { projects: results, durationMs: Date.now() - started, ready: this.client.ready, message: "No Maven or Gradle build descriptors found in the workspace" };
+    if (results.some(result => result.updated)) this.sync.indexGeneration++;
+    const ready = results.some(result => result.updated) ? await this.client.waitReady(remaining(deadline)).catch(() => false) : this.client.ready;
+    return compact({ projects: results, durationMs: Date.now() - started, ready, ...(!ready && { message: "JDT is still importing; observe readiness with java_status {\"waitForReady\":true}" }) });
+  }
+  private async resolveUpdateTargets(paths: string[] | undefined, all: boolean): Promise<Array<{ path: string; uri: string; excluded: boolean; missing: boolean }>> {
+    const configuredExclusions = this.excludedProjectRoots();
+    if (configuredExclusions.missing.length) throw new JavaLspMcpError("EXCLUDED_PROJECT_NOT_FOUND", `Excluded project not found in workspace: ${configuredExclusions.missing.join(", ")}`);
+    const seen = new Set<string>();
+    const targets: Array<{ path: string; uri: string; excluded: boolean; missing: boolean }> = [];
+    const push = (path: string, uri: string): void => {
+      if (seen.has(uri)) return; seen.add(uri);
+      targets.push({ path, uri, excluded: configuredExclusions.roots.some(root => fileUriWithin(uri, root)), missing: false });
+    };
+    if (!all && paths && !paths.includes("*")) {
+      for (const input of paths) {
+        let absolute: string;
+        try { absolute = this.paths.resolve(input); }
+        catch (error) { if (error instanceof JavaLspMcpError) throw error; targets.push({ path: input, uri: "", excluded: false, missing: true }); continue; }
+        if (!existsSync(absolute)) { targets.push({ path: input, uri: "", excluded: false, missing: true }); continue; }
+        const descriptor = findBuildDescriptor(absolute, this.paths.root);
+        if (descriptor) push(this.paths.relative(descriptor), pathToFileURL(descriptor).href);
+        else push(this.paths.relative(absolute), pathToFileURL(absolute).href);
+      }
+      return targets;
+    }
+    for (const descriptor of workspaceFiles(this.paths.root, name => (buildDescriptors as readonly string[]).includes(name)).sort()) {
+      push(this.paths.relative(descriptor), pathToFileURL(descriptor).href);
+    }
+    return targets;
   }
   async debugTestLaunches(input: TestInput, signal?: AbortSignal): Promise<JunitRunOptions[]> {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
@@ -685,6 +751,22 @@ function toLspPosition(snapshot: Snapshot, position: Pick<PositionTarget, "line"
 }
 function toLspRange(snapshot: Snapshot, range: { line: number; column: number; endLine: number; endColumn: number }): LspRange {
   return { start: toLspPosition(snapshot, range), end: toLspPosition(snapshot, { line: range.endLine, column: range.endColumn }) };
+}
+const buildDescriptors = ["pom.xml", "build.gradle", "build.gradle.kts"] as const;
+function unimportedProjectHint(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return /does not belong to (any|an existing) Java project/u.test(message) ? `${message}; run with force:true to import new modules` : message;
+}
+function findBuildDescriptor(start: string, root: string): string | undefined {
+  let current = start;
+  try { if (!statSync(current).isDirectory()) current = dirname(current); } catch { current = dirname(current); }
+  for (;;) {
+    for (const name of buildDescriptors) { const candidate = resolve(current, name); if (existsSync(candidate)) return candidate; }
+    if (current === root) return undefined;
+    const parent = dirname(current);
+    if (parent === current || !pathWithin(parent, root)) return undefined;
+    current = parent;
+  }
 }
 function defaultTestClass(snapshot: Snapshot): string {
   const packageName = /^\s*package\s+([\w.]+)\s*;/mu.exec(snapshot.content)?.[1];

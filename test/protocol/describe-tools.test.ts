@@ -8,6 +8,6 @@ test("describe-tools prints complete formatted schemas without a workspace", () 
   assert.equal(result.status, 0, result.stderr);
   assert.ok(result.stdout.includes("\n  \"tools\""));
   const described = JSON.parse(result.stdout) as { tools: Array<Record<string, unknown>> };
-  assert.equal(described.tools.length, 25);
+  assert.equal(described.tools.length, 26);
   assert.ok(described.tools.every(tool => tool.inputSchema && tool.outputSchema));
 });

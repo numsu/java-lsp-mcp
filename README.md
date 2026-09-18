@@ -41,6 +41,7 @@ On Windows use `bin\java-lsp-mcp.cmd`. Run `java-lsp-mcp doctor --workspace /pro
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
 | `java_diagnostics` | Current-snapshot diagnostics |
 | `java_compile` | ECJ workspace compilation with automatic loaded-prerequisite recovery |
+| `java_update_projects` | Maven/Gradle configuration re-sync into JDT (`force` for full reimport) |
 | `java_run_tests` | JUnit execution or suspended JDWP debug launch (`debug: true`) |
 | `java_find_affected_tests` | Statically connected tests |
 | `java_find_unused_code` | Candidate unused private members |

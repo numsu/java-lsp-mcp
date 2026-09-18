@@ -137,6 +137,8 @@ export class LspClient {
   rename(uri: string, position: object, newName: string, timeout: number): Promise<WorkspaceEdit> { return this.request("textDocument/rename", { textDocument: { uri }, position, newName }, timeout); }
   format(uri: string, range: object | undefined, timeout: number): Promise<TextEdit[]> { return this.request(range ? "textDocument/rangeFormatting" : "textDocument/formatting", { textDocument: { uri }, ...(range && { range }), options: { tabSize: 4, insertSpaces: true } }, timeout); }
   isTestFile(uri: string, timeout: number): Promise<boolean> { return this.request("workspace/executeCommand", { command: "java.project.isTestFile", arguments: [uri] }, timeout); }
+  updateProjectConfiguration(uri: string, timeout: number): Promise<void> { return this.request("workspace/executeCommand", { command: "java.projectConfiguration.update", arguments: [uri] }, timeout); }
+  importProjects(timeout: number): Promise<void> { return this.request("workspace/executeCommand", { command: "java.project.import", arguments: [] }, timeout); }
   testClasspaths(uri: string, timeout: number): Promise<{ projectRoot?: string; classpaths?: string[]; modulepaths?: string[] }> { return this.request("workspace/executeCommand", { command: "java.project.getClasspaths", arguments: [uri, JSON.stringify({ scope: "test" })] }, timeout); }
   build(clean: boolean, timeout: number): Promise<number> { return this.request("java/buildWorkspace", clean, timeout); }
   projects(timeout: number): Promise<string[]> { return this.request("workspace/executeCommand", { command: "java.project.getAll", arguments: [] }, timeout); }
