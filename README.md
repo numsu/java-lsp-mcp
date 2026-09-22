@@ -76,7 +76,7 @@ Other commands: `doctor` checks the setup, `version` prints versions, `describe-
 | `java_find_references` | Semantic usages |
 | `java_call_hierarchy` | Callers and callees; incoming callers default to production scope |
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
-| `java_diagnostics` | Current-snapshot diagnostics |
+| `java_diagnostics` | Current-snapshot diagnostics; fails fast with `JDT_BUSY` when JDT is busy and diagnostics are stale |
 | `java_compile` | ECJ workspace compilation with automatic loaded-prerequisite recovery |
 | `java_update_projects` | Maven/Gradle configuration re-sync into JDT (`force` for full reimport) |
 | `java_run_tests` | JUnit execution or suspended JDWP debug launch (`debug: true`) |

@@ -115,6 +115,34 @@ test("multiple diagnostic paths share one parallel deadline", async () => {
   assert.ok(Date.now() - started < 80, "path waits should run concurrently"); assert.equal(result.status, "partial"); assert.deepEqual(result.pendingPaths, [snapshot.path, second.path]);
 });
 
+test("diagnostics fails fast with JDT_BUSY when JDT is busy and diagnostics are stale", async () => {
+  let waits = 0;
+  const client = { state: "building", activity: "Building workspace", statusMessage: "Building", waitReady: async () => true, isDocumentOpen: () => false, closeDocument: async () => {}, diagnostics: { waitFor: async () => { waits++; return undefined; }, get: () => undefined, all: () => [] } } as unknown as LspClient;
+  const started = Date.now();
+  const error = await new JavaService(config, paths, sync, client).diagnostics({ scope: "path", path: snapshot.path, minimumSeverity: "warning", waitForCurrentVersion: true, includeText: false, timeoutMs: 30_000, limit: 50, includeTotal: false }).then(() => undefined, (error: unknown) => error as { code: string; message: string; details: Record<string, unknown> });
+  assert.ok(error, "expected JDT_BUSY");
+  assert.equal(error.code, "JDT_BUSY");
+  assert.match(String(error.message), /building/iu);
+  assert.deepEqual(error.details.pendingPaths, [snapshot.path]);
+  assert.match(String((error.details.hint as string) ?? ""), /java_status.*waitForReady|pending paths/iu);
+  assert.equal(waits, 0, "must not burn the full timeout waiting for publish");
+  assert.ok(Date.now() - started < 1000, "must fail fast instead of waiting timeoutMs");
+});
+
+test("diagnostics does not throw JDT_BUSY when cached diagnostics are already current", async () => {
+  const set = { uri: snapshot.uri, version: snapshot.version, epoch: 1, diagnostics: [], receivedAt: Date.now() };
+  const client = { state: "building", activity: "Building workspace", statusMessage: "Building", waitReady: async () => true, isDocumentOpen: () => true, closeDocument: async () => {}, diagnostics: { waitFor: async () => set, get: () => set, all: () => [set] } } as unknown as LspClient;
+  const result = await new JavaService(config, paths, sync, client).diagnostics({ scope: "path", path: snapshot.path, minimumSeverity: "warning", waitForCurrentVersion: true, includeText: false, timeoutMs: 30_000, limit: 50, includeTotal: false }) as { status: string };
+  assert.equal(result.status, "final");
+});
+
+test("diagnostics does not throw JDT_BUSY when waitForCurrentVersion is false", async () => {
+  const client = { state: "importing", activity: "Importing Maven projects", statusMessage: "Importing", waitReady: async () => true, isDocumentOpen: () => false, closeDocument: async () => {}, diagnostics: { waitFor: async () => { throw new Error("must not wait"); }, get: () => undefined, all: () => [] } } as unknown as LspClient;
+  const result = await new JavaService(config, paths, sync, client).diagnostics({ scope: "path", path: snapshot.path, minimumSeverity: "warning", waitForCurrentVersion: false, includeText: false, timeoutMs: 30_000, limit: 50, includeTotal: false }) as { status: string; pendingPaths: string[] };
+  assert.equal(result.status, "partial");
+  assert.deepEqual(result.pendingPaths, [snapshot.path]);
+});
+
 test("compile explains JDT WITH_ERROR when no diagnostics were published", async () => {
   const client = { state: "ready", waitReady: async () => true, build: async () => 2, diagnostics: { currentEpoch: () => 0, settleAfter: async () => false, all: () => [] } } as unknown as LspClient;
   const result = await new JavaService(config, paths, sync, client).compile({ kind: "incremental", minimumSeverity: "error", includeText: false, timeoutMs: 1000, limit: 100, includeTotal: true }) as Record<string, unknown>;

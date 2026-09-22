@@ -184,8 +184,11 @@ export class JavaService {
     const requested = [...new Set(input.scope === "path" ? [input.path!] : input.scope === "paths" ? input.paths! : this.sync.snapshots.all().map(s => s.path))];
     const prepared: Array<{ snapshot: Snapshot; wasOpen: boolean }> = [];
     try {
-      for (const path of requested) { const uri = pathToFileURL(this.paths.resolve(path)).href; const wasOpen = this.client.isDocumentOpen(uri); const snapshot = await this.sync.verify(path); prepared.push({ snapshot, wasOpen }); await this.prepare(); }
+      for (const path of requested) { const uri = pathToFileURL(this.paths.resolve(path)).href; const wasOpen = this.client.isDocumentOpen(uri); const snapshot = await this.sync.verify(path); prepared.push({ snapshot, wasOpen }); }
+      await this.sync.flush();
+      if (!await this.client.waitReady(remaining(deadline))) throw new JavaLspMcpError("JDT_NOT_READY", `JDT LS did not become semantically ready within ${input.timeoutMs}ms`, { state: this.client.state, message: this.client.statusMessage, hint: "The same readiness gate is used by every Java tool; call java_status with waitForReady=true to observe it" });
       const snapshots = prepared.map(item => item.snapshot); const requestedUris = new Set(snapshots.map(snapshot => snapshot.uri)); const entries: Array<{ uri: string; diagnostic: Diagnostic }> = [];
+      if (input.waitForCurrentVersion) this.throwIfJdtBusy(snapshots);
       const sets = await Promise.all(snapshots.map(async snap => ({ snap, set: input.waitForCurrentVersion ? await this.client.diagnostics.waitFor(snap.uri, snap.version, remaining(deadline), snap.syncedAt ?? snap.mtimeMs, signal) : this.client.diagnostics.get(snap.uri) })));
       const pendingPaths: string[] = [];
       for (const { snap, set } of sets) { if (!set) { pendingPaths.push(snap.path); continue; } for (const diagnostic of set.diagnostics) if (severityRank(diagnostic) <= severityNameRank(input.minimumSeverity)) entries.push({ uri: snap.uri, diagnostic }); }
@@ -664,6 +667,18 @@ export class JavaService {
     const nextOffset = offset + selected.length; return { items: selected, ...(nextOffset < values.length && { nextCursor: this.cursors.sign(fp, nextOffset, this.sync.indexGeneration) }) };
   }
   private async prepare(): Promise<void> { await this.sync.flush(); if (!await this.client.waitReady(this.config.timeoutMs)) throw new JavaLspMcpError("JDT_NOT_READY", `JDT LS did not become semantically ready within ${this.config.timeoutMs}ms`, { state: this.client.state, message: this.client.statusMessage, hint: "The same readiness gate is used by every Java tool; call java_status with waitForReady=true to observe it" }); }
+  private throwIfJdtBusy(snapshots: Snapshot[]): void {
+    if (!isTransientJdtState(this.client.state)) return;
+    const pending = snapshots.filter(snap => {
+      const set = this.client.diagnostics.get(snap.uri);
+      if (!set) return true;
+      return set.version !== undefined ? set.version < snap.version : set.receivedAt < (snap.syncedAt ?? snap.mtimeMs);
+    });
+    if (!pending.length) return;
+    const activity = this.client.activity;
+    const statusMessage = this.client.statusMessage;
+    throw new JavaLspMcpError("JDT_BUSY", `JDT is ${this.client.state}${activity ? ` (${activity})` : ""}; current-version diagnostics for ${pending.length} path(s) are not yet published`, { state: this.client.state, ...(activity && { activity }), ...(statusMessage && { message: statusMessage }), pendingPaths: pending.map(snap => snap.path), hint: "Call java_status with waitForReady=true to wait for readiness, then retry java_diagnostics for the pending paths; if pom.xml/build.gradle changed, call java_update_projects then java_compile" });
+  }
   private async prepareFile(path: string): Promise<Snapshot> { const snap = await this.sync.verify(path); await this.prepare(); return snap; }
   private async resolveTarget(target: SymbolTarget): Promise<{ snapshot: Snapshot; position: { line: number; character: number } }> {
     if ("path" in target) { const snapshot = await this.prepareFile(target.path); return { snapshot, position: toLspPosition(snapshot, target) }; }
@@ -796,6 +811,7 @@ function nearestProjectDirectory(start: string, root: string): string {
 }
 function remaining(deadline: number): number { return Math.max(1, deadline - Date.now()); }
 function operationalDeadline(timeoutMs: number): number { return Date.now() + Math.max(1, timeoutMs - Math.min(250, Math.floor(timeoutMs / 10))); }
+function isTransientJdtState(state: string | undefined): boolean { return state === "starting" || state === "importing" || state === "building" || state === "indexing" || state === "busy"; }
 function expired(deadline: number, signal?: AbortSignal): boolean { if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled"); return Date.now() >= deadline; }
 function uniqueWarnings(warnings: object[]): object[] { const values = new Map<string, object>(); for (const warning of warnings) values.set(JSON.stringify(warning), warning); return [...values.values()]; }
 function searchResultKey(value: object): string { const item = value as Record<string, unknown>; return `${String(item.path)}\0${String(item.name)}\0${String(item.kind)}`; }
