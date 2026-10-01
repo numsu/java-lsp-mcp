@@ -1,8 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { inputs, outputs } from "../../src/mcp/schemas.js";
-test("symbol target is a strict discriminated union", () => { assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 1 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 1, qualifiedName: "A" } }).success, false); });
+test("symbol target is a strict discriminated union", () => { assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 5 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { qualifiedName: "A" } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", qualifiedName: "A" } }).success, false); });
 test("limits are bounded", () => assert.equal(inputs.java_search_symbols.safeParse({ query: "A", limit: 201 }).success, false));
+test("search line hints are optional and positive integers", () => {
+  assert.equal(inputs.java_search_symbols.parse({ query: "A" }).line, undefined);
+  assert.equal(inputs.java_search_symbols.parse({ query: "A", line: 42 }).line, 42);
+  for (const line of [0, -1, 1.5]) assert.equal(inputs.java_search_symbols.safeParse({ query: "A", line }).success, false);
+});
 test("source ranges are ordered and diagnostic scope parameters are unambiguous", () => {
   assert.equal(inputs.java_code_actions.safeParse({ path: "A.java", range: { line: 2, column: 1, endLine: 1, endColumn: 1 } }).success, false);
   assert.equal(inputs.java_diagnostics.safeParse({ scope: "workspace", path: "A.java" }).success, false);
@@ -16,7 +21,7 @@ test("outline accepts compact filters and a nullable first-page cursor", () => {
   assert.equal(result.includeTotal, false);
 });
 test("source text, totals, and edit diffs are opt-in", () => {
-  const target = { path: "src/Example.java", line: 1, column: 1 };
+  const target = { path: "src/Example.java", line: 1 };
   const references = inputs.java_find_references.parse({ target });
   assert.equal(references.includeText, false);
   assert.equal(references.contextLines, 0);
@@ -54,7 +59,7 @@ test("targeted tests default to incremental compilation and compact output", () 
 test("outline containment and read-only analyses have bounded defaults", () => {
   assert.equal(inputs.java_outline.parse({ path: "A.java", containingLine: 42 }).containingLine, 42);
   assert.deepEqual(inputs.java_find_unused_code.parse({}).kinds, ["method", "constructor", "field"]);
-  const affected = inputs.java_find_affected_tests.parse({ target: { path: "A.java", line: 1, column: 1 } }); assert.equal(affected.transitive, true); assert.equal(affected.maxDepth, 10);
+  const affected = inputs.java_find_affected_tests.parse({ target: { path: "A.java", line: 1 } }); assert.equal(affected.transitive, true); assert.equal(affected.maxDepth, 10);
 });
 test("debug tools enforce state handles and bounded waits", () => {
   assert.deepEqual(inputs.java_debug_targets.parse({}), { includeUnavailable: false });

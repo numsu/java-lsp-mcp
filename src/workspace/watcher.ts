@@ -14,7 +14,7 @@ export class WorkspaceSynchronizer {
   private readonly pending = new Map<string, boolean>();
   private timer: NodeJS.Timeout | undefined;
   private chain = Promise.resolve();
-  constructor(private readonly paths: WorkspacePaths, private readonly client: LspClient, private readonly logger: Logger, sourceEncoding?: string) { this.snapshots = new SnapshotStore(paths, sourceEncoding); }
+  constructor(private readonly paths: WorkspacePaths, private readonly client: LspClient, private readonly logger: Logger, sourceEncoding?: string) { this.snapshots = new SnapshotStore(paths, sourceEncoding, logger); }
   async start(): Promise<void> {
     this.watcher = chokidar.watch(["**/*.java", ...watchedProjectFiles.filter(name => !name.endsWith(".java")).map(name => `**/${name}`)], {
       cwd: this.paths.root, ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },

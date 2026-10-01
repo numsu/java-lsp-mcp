@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import type { Logger } from "../logging.js";
 import { sha256 } from "../results/edits.js";
 import type { Snapshot } from "../types.js";
 import type { WorkspacePaths } from "./paths.js";
@@ -9,7 +10,7 @@ export class SnapshotStore {
   private readonly values = new Map<string, Snapshot>();
   private sequence = 0;
   private readonly decoder: SourceDecoder;
-  constructor(private readonly paths: WorkspacePaths, sourceEncoding?: string) { this.decoder = new SourceDecoder(paths, sourceEncoding); }
+  constructor(private readonly paths: WorkspacePaths, sourceEncoding?: string, logger?: Logger) { this.decoder = new SourceDecoder(paths, sourceEncoding, logger); }
   async verify(relativePath: string): Promise<{ snapshot: Snapshot; changed: boolean }> {
     const absolute = this.paths.resolve(relativePath);
     const [content, metadata] = await Promise.all([this.decoder.read(absolute), stat(absolute)]);

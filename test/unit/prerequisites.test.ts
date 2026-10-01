@@ -19,4 +19,5 @@ test("Node.js is an external prerequisite, not a bundled runtime", () => {
 test("doctor reports the Node.js prerequisite", () => {
   const result = spawnSync(process.execPath, [resolve("dist/server.mjs"), "doctor", "--workspace", resolve("test/fixtures/unmanaged")], { encoding: "utf8" });
   assert.match(result.stdout, /^OK Node\.js: /mu);
+  assert.match(result.stdout, /^OK source encoding: .*Windows-1252 fallback/mu);
 });

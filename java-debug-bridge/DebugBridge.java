@@ -130,11 +130,12 @@ class DebugBridge {
       if (wait > 0) return waitForStop(wait); return context(obj("outcome", "running", "activeRequest", pendingAction == null ? null : raw(requestInfo())));
     }
     synchronized String breakpoints(String sourcePath, String linesText, int timeout) throws InterruptedException {
-      for (LogicalBreakpoint bp : breakpoints) if (bp.source.equals(sourcePath)) bp.delete(vm);
-      breakpoints.removeIf(bp -> bp.source.equals(sourcePath)); List<String> result = new ArrayList<>();
+      String normalized = sourcePath.replace('\\', '/');
+      for (LogicalBreakpoint bp : breakpoints) if (bp.source.equals(normalized)) bp.delete(vm);
+      breakpoints.removeIf(bp -> bp.source.equals(normalized)); List<String> result = new ArrayList<>();
       if (!linesText.isBlank()) for (String text : linesText.split(",")) { LogicalBreakpoint bp = new LogicalBreakpoint(token("bp"), sourcePath, Integer.parseInt(text)); breakpoints.add(bp); bp.install(vm, null); result.add(bp.json()); }
       long deadline = System.currentTimeMillis() + timeout;
-      while (System.currentTimeMillis() < deadline && breakpoints.stream().filter(bp -> bp.source.equals(sourcePath)).anyMatch(bp -> bp.requests.isEmpty())) { Thread.sleep(25); }
+      while (System.currentTimeMillis() < deadline && breakpoints.stream().filter(bp -> bp.source.equals(normalized)).anyMatch(bp -> bp.requests.isEmpty())) { Thread.sleep(25); }
       return obj("sourcePath", sourcePath, "breakpoints", raw(array(result)));
     }
     void installPending(ReferenceType type) { for (LogicalBreakpoint bp : breakpoints) if (bp.requests.isEmpty()) bp.install(vm, type); }

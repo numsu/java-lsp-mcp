@@ -20,7 +20,7 @@ export interface Snapshot {
   syncedAt?: number;
 }
 
-export interface PositionTarget { path: string; line: number; column: number }
+export interface PositionTarget { path: string; line: number; column?: number | undefined }
 export interface QualifiedTarget { qualifiedName: string }
 export type SymbolTarget = PositionTarget | QualifiedTarget;
 

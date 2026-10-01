@@ -5,6 +5,8 @@ import { JavaService } from "../../src/mcp/service.js";
 import type { WorkspacePaths } from "../../src/workspace/paths.js";
 import type { WorkspaceSynchronizer } from "../../src/workspace/watcher.js";
 import type { Snapshot } from "../../src/types.js";
+import { Logger } from "../../src/logging.js";
+import { SnapshotStore } from "../../src/workspace/snapshots.js";
 import { JavaLspMcpError } from "../../src/types.js";
 import { WorkspacePaths as RealWorkspacePaths } from "../../src/workspace/paths.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -118,5 +120,28 @@ test("optional implementation decoding failure returns the symbol and a warning"
     const localSync = { indexGeneration: 0, flush: async () => {}, verify: async () => { throw new JavaLspMcpError("SOURCE_ENCODING_REQUIRED", "Source file is not valid UTF-8"); } } as unknown as WorkspaceSynchronizer;
     const result = await new JavaService({ workspace, offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 }, realPaths, localSync, client).search({ query: "Legacy", scope: "workspace", mode: "exact", kinds: ["class"], includeImplementation: true, limit: 50, includeTotal: false }) as { symbols: object[]; warnings: Array<Record<string, unknown>> };
     assert.equal(result.symbols.length, 1); assert.equal(result.warnings[0]?.code, "SOURCE_ENCODING_REQUIRED"); assert.match(String(result.warnings[0]?.message), /implementation was omitted/u);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test("line-narrowed search includes implementation from unconfigured legacy source", async t => {
+  const workspace = await mkdtemp(join(tmpdir(), "java-lsp-mcp-legacy-implementation-"));
+  try {
+    const content = ["class Company {", "  String getYTunnus() {", '    return "\u00f6";', "  }", "  String getYTunnus(int id) { return null; }", "}"].join("\n");
+    await writeFile(join(workspace, "Company.java"), Buffer.from(content, "latin1"));
+    const paths = new RealWorkspacePaths(workspace); const logger = new Logger("warn"); t.mock.method(logger, "warn", () => {});
+    const snapshots = new SnapshotStore(paths, undefined, logger); const snapshot = (await snapshots.verify("Company.java")).snapshot;
+    const selectionRange = { start: { line: 1, character: 9 }, end: { line: 1, character: 19 } };
+    const method = { name: "getYTunnus()", kind: 6, range: { start: { line: 1, character: 2 }, end: { line: 3, character: 3 } }, selectionRange };
+    const other = { name: "getYTunnus(int)", kind: 6, range: { start: { line: 4, character: 2 }, end: { line: 4, character: 41 } }, selectionRange: { start: { line: 4, character: 9 }, end: { line: 4, character: 19 } } };
+    const client = {
+      state: "ready", waitReady: async () => true,
+      symbols: async () => [method, other].map(symbol => ({ name: symbol.name, kind: 6, containerName: "Company", location: { uri: snapshot.uri, range: symbol.selectionRange } })),
+      extendedOutline: async () => [{ name: "Company", kind: 5, range: { start: { line: 0, character: 0 }, end: { line: 5, character: 1 } }, selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } }, children: [method, other] }],
+    } as unknown as LspClient;
+    const sync = { indexGeneration: 0, snapshots, flush: async () => {}, verify: async (path: string) => (await snapshots.verify(path)).snapshot } as unknown as WorkspaceSynchronizer;
+    const service = new JavaService({ workspace, offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 }, paths, sync, client);
+    const result = await service.search({ query: "getYTunnus", scope: "workspace", mode: "exact", line: 2, includeImplementation: true, limit: 50, includeTotal: true }) as { symbols: Array<{ implementation: string; startLine: number; endLine: number }>; total: number };
+    assert.equal(result.total, 1); assert.equal(result.symbols[0]?.startLine, 2); assert.equal(result.symbols[0]?.endLine, 4);
+    assert.equal(result.symbols[0]?.implementation, content.split("\n").slice(1, 4).join("\n"));
   } finally { await rm(workspace, { recursive: true, force: true }); }
 });

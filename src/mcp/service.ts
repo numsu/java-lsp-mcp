@@ -14,7 +14,7 @@ import { codePointToUtf16Column, lines, publicLocation } from "../results/positi
 import { resolveCoverageRuntime, resolveTestRuntime } from "../runtime/resolver.js";
 import { createCoverageReport, type CoverageReport } from "../testing/coverage.js";
 import { runJUnit, type JunitRunOptions, type JunitRunResult } from "../testing/junit.js";
-import { JavaLspMcpError, type LspPosition, type LspRange, type PositionTarget, type Snapshot, type SymbolTarget } from "../types.js";
+import { JavaLspMcpError, type LspPosition, type LspRange, type Snapshot, type SymbolTarget } from "../types.js";
 import { discoverProject } from "../workspace/discovery.js";
 import type { WorkspacePaths } from "../workspace/paths.js";
 import { fileUriWithin, foldPath, pathWithin } from "../workspace/paths.js";
@@ -88,10 +88,10 @@ export class JavaService {
     const page = this.paginate(values, input.limit, input.cursor, query, symbols => ({ symbols }));
     return { ...paged(page, "symbols", input.includeTotal, values.length) };
   }
-  async search(input: { query: string; kinds?: string[] | undefined; scope: string; mode: string; includeImplementation: boolean; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
+  async search(input: { query: string; kinds?: string[] | undefined; scope: string; mode: string; line?: number | undefined; includeImplementation: boolean; limit: number; includeTotal: boolean; cursor?: string | undefined }): Promise<object> {
     await this.prepare(); const raw = await this.client.symbols(jdtSymbolQuery(input.query, input.mode), this.config.timeoutMs);
     const filtered = raw.filter(s => symbolNameMatches(s.name, input.query, input.mode)).filter(s => input.scope === "all" || this.paths.fromUri(s.location.uri).origin === (input.scope === "workspace" ? "workspace" : "dependency")).filter(s => !input.kinds?.length || input.kinds.includes(kinds[s.kind] ?? ""));
-    const candidates: SearchCandidate[] = filtered.map(symbol => ({ symbol, value: this.symbol(symbol) as Record<string, unknown> }));
+    let candidates: SearchCandidate[] = filtered.map(symbol => ({ symbol, value: this.symbol(symbol) as Record<string, unknown> }));
     if (typeof this.paths.root === "string" && input.scope !== "dependencies" && (input.kinds?.includes("enumMember") || !input.kinds?.length && filtered.length === 0)) {
       const excluded = this.excludedProjectRoots().roots;
       for (const entry of await this.enumConstants.all(this.sync.indexGeneration, excluded)) {
@@ -101,6 +101,15 @@ export class JavaService {
         const candidate = { symbol, value: this.symbol(symbol) as Record<string, unknown>, warning: entry.warning };
         if (duplicate >= 0) candidates[duplicate] = candidate; else candidates.push(candidate);
       }
+    }
+    const line = input.line;
+    if (line !== undefined && candidates.length > 1) {
+      const nearest = candidates.reduce((best, candidate) => {
+        const candidateLine = candidate.symbol.location.range.start.line + 1;
+        const bestLine = best.symbol.location.range.start.line + 1;
+        return Math.abs(candidateLine - line) < Math.abs(bestLine - line) ? candidate : best;
+      });
+      candidates = [nearest];
     }
     const implementationWarnings: object[] = [];
     if (input.includeImplementation && candidates.length === 1) {
@@ -681,7 +690,14 @@ export class JavaService {
   }
   private async prepareFile(path: string): Promise<Snapshot> { const snap = await this.sync.verify(path); await this.prepare(); return snap; }
   private async resolveTarget(target: SymbolTarget): Promise<{ snapshot: Snapshot; position: { line: number; character: number } }> {
-    if ("path" in target) { const snapshot = await this.prepareFile(target.path); return { snapshot, position: toLspPosition(snapshot, target) }; }
+    if ("path" in target) {
+      if (target.line === undefined) throw new JavaLspMcpError("INVALID_POSITION", `path target "${target.path}" needs a line to pinpoint the symbol; pass a qualifiedName target or add a line`);
+      const snapshot = await this.prepareFile(target.path); const position = toLspPosition(snapshot, target);
+      if (target.column !== undefined) return { snapshot, position };
+      const symbol = smallestContainingSymbol(await this.documentOutline(snapshot, this.config.timeoutMs), position.line, new Set(kinds.filter(kind => kind && kind !== "package")));
+      if (!symbol) throw new JavaLspMcpError("SYMBOL_NOT_FOUND", `No declaration encloses line ${target.line} in ${target.path}; add a column to target an exact source position`);
+      return { snapshot, position: symbol.selectionRange.start };
+    }
     const symbol = await this.resolveQualifiedSymbol(target.qualifiedName); const normalized = this.paths.fromUri(symbol.location.uri); if (!normalized.editable) throw new JavaLspMcpError("DEPENDENCY_TARGET", "Qualified dependency targets require a source position"); const snapshot = await this.prepareFile(normalized.path); return { snapshot, position: symbol.location.range.start };
   }
   private async resolveQualifiedSymbol(qualifiedName: string): Promise<SymbolInformation> {
@@ -765,10 +781,10 @@ export function resolveTestClasspathEntries(entries: string[], projectRootUri: s
 }
 function compileNamePattern(pattern: string | undefined): RegExp | undefined { if (!pattern) return undefined; if (/\\[1-9]|\(\?<?[=!]|\([^)]*[*+]\)[*+{]/u.test(pattern)) throw new JavaLspMcpError("INVALID_PATTERN", "namePattern uses an unsafe regular-expression construct"); try { return new RegExp(pattern, "u"); } catch (error) { throw new JavaLspMcpError("INVALID_PATTERN", error instanceof Error ? error.message : String(error)); } }
 function declarationVisibility(snapshot: Snapshot, symbol: DocumentSymbol): "public" | "protected" | "package" | "private" { const source = lines(snapshot.content); const fragments = source.slice(symbol.range.start.line, symbol.selectionRange.start.line + 1); if (fragments.length) fragments[fragments.length - 1] = fragments.at(-1)!.slice(0, symbol.selectionRange.start.character); const declaration = fragments.join("\n").replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/gu, " "); const matches = [...declaration.matchAll(/\b(public|protected|private)\b/gu)]; return (matches.at(-1)?.[1] as "public" | "protected" | "private" | undefined) ?? "package"; }
-function toLspPosition(snapshot: Snapshot, position: Pick<PositionTarget, "line" | "column">): LspPosition {
+function toLspPosition(snapshot: Snapshot, position: { line: number; column?: number | undefined }): LspPosition {
   const line = lines(snapshot.content)[position.line - 1];
   if (line === undefined) throw new JavaLspMcpError("INVALID_POSITION", `Line ${position.line} is outside ${snapshot.path}`);
-  try { return { line: position.line - 1, character: codePointToUtf16Column(line, position.column) }; }
+  try { return { line: position.line - 1, character: codePointToUtf16Column(line, position.column ?? 1) }; }
   catch (error) { throw new JavaLspMcpError("INVALID_POSITION", error instanceof Error ? error.message : String(error)); }
 }
 function toLspRange(snapshot: Snapshot, range: { line: number; column: number; endLine: number; endColumn: number }): LspRange {
@@ -824,7 +840,7 @@ function symbolAtPosition(symbols: DocumentSymbol[], line: number, character: nu
   return matches.sort((left, right) => rangeSize(left.symbol.range) - rangeSize(right.symbol.range))[0];
 }
 function smallestContainingSymbol(symbols: DocumentSymbol[], line: number, wanted: Set<string>): DocumentSymbol | undefined {
-  return flattenSymbols(symbols).filter(symbol => wanted.has(kinds[symbol.kind] ?? "") && symbol.range.start.line <= line && symbol.range.end.line >= line).sort((a, b) => (a.range.end.line - a.range.start.line) - (b.range.end.line - b.range.start.line))[0];
+  return flattenSymbols(symbols).filter(symbol => wanted.has(kinds[symbol.kind] ?? "") && symbol.range.start.line <= line && symbol.range.end.line >= line).sort((a, b) => rangeSize(a.range) - rangeSize(b.range))[0];
 }
 function symbolIdentity(symbols: DocumentSymbol[], line: number, character: number): { symbol: DocumentSymbol; classes: DocumentSymbol[] } | undefined {
   let exact: { symbol: DocumentSymbol; classes: DocumentSymbol[] } | undefined; let containing: { symbol: DocumentSymbol; classes: DocumentSymbol[] } | undefined;

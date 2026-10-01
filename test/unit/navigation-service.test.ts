@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { inputs } from "../../src/mcp/schemas.js";
 import type { LspClient } from "../../src/jdtls/client.js";
 import { JavaService, resolveTestClasspathEntries, symbolNameMatches, type TestInput } from "../../src/mcp/service.js";
 import type { Snapshot } from "../../src/types.js";
@@ -59,9 +60,63 @@ test("fuzzy symbol search broadens the JDT query and filters its candidates", as
   assert.equal(result.total, 1);
 });
 
+test("symbol search returns all matches and narrows to the nearest with a line hint", async () => {
+  const first = { uri: snapshot.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } };
+  const middle = { uri: snapshot.uri, range: { start: { line: 4, character: 0 }, end: { line: 4, character: 1 } } };
+  const last = { uri: snapshot.uri, range: { start: { line: 8, character: 0 }, end: { line: 8, character: 1 } } };
+  const makeClient = (): LspClient => ({ state: "ready", waitReady: async () => true, symbols: async () => [{ name: "work", containerName: "A", kind: 6, location: first }, { name: "work", containerName: "B", kind: 6, location: middle }, { name: "work", containerName: "C", kind: 6, location: last }] }) as unknown as LspClient;
+  const all = await new JavaService(config, paths, sync, makeClient()).search({ query: "work", mode: "exact", scope: "workspace", includeImplementation: false, limit: 50, includeTotal: true }) as { symbols: Array<{ name: string; container: string }>; total: number };
+  assert.equal(all.total, 3);
+  const nearest = await new JavaService(config, paths, sync, makeClient()).search({ query: "work", mode: "exact", scope: "workspace", line: 6, includeImplementation: false, limit: 50, includeTotal: true }) as { symbols: Array<{ name: string; container: string }>; total: number };
+  assert.equal(nearest.total, 1);
+  assert.equal(nearest.symbols[0]!.container, "B");
+  const tied = await new JavaService(config, paths, sync, makeClient()).search({ query: "work", mode: "exact", scope: "workspace", line: 3, includeImplementation: false, limit: 1, includeTotal: true }) as { symbols: Array<{ container: string }>; total: number; nextCursor?: string };
+  assert.equal(tied.symbols[0]!.container, "A"); assert.equal(tied.total, 1); assert.equal(tied.nextCursor, undefined);
+  const paginated = await new JavaService(config, paths, sync, makeClient()).search({ query: "work", mode: "exact", scope: "workspace", includeImplementation: false, limit: 1, includeTotal: true }) as { symbols: object[]; total: number; nextCursor?: string };
+  assert.equal(paginated.symbols.length, 1); assert.equal(paginated.total, 3); assert.ok(paginated.nextCursor);
+});
+
+test("path navigation targets require a line in their input schema", () => {
+  assert.equal(inputs.java_find_definition.safeParse({ target: { path: snapshot.path } }).success, false);
+  assert.equal(inputs.java_find_references.safeParse({ target: { path: snapshot.path } }).success, false);
+});
+
+test("line-only navigation selects declarations instead of leading whitespace", async () => {
+  const positions: Array<{ line: number; character: number }> = [];
+  const client = {
+    state: "ready", waitReady: async () => true, extendedOutline: async () => outline,
+    references: async (_uri: string, position: { line: number; character: number }) => { positions.push(position); return []; },
+  } as unknown as LspClient;
+  const service = new JavaService(config, paths, sync, client);
+  const request = { includeDeclaration: false, scope: "workspace", includeEnclosing: false, includeText: false, contextLines: 0, maxSnippetCharacters: 1000, limit: 50, includeTotal: false };
+  for (const line of [1, 2, 3, 4]) await service.references({ ...request, target: { path: snapshot.path, line } });
+  await service.references({ ...request, target: { path: snapshot.path, line: 4, column: 9 } });
+  await service.references({ ...request, target: { path: snapshot.path, line: 2, column: 999 } });
+  assert.deepEqual(positions, [
+    { line: 0, character: 6 }, { line: 1, character: 6 },
+    { line: 2, character: 7 }, { line: 2, character: 7 },
+    { line: 3, character: 8 }, { line: 1, character: 8 },
+  ]);
+  await assert.rejects(service.references({ ...request, target: { path: snapshot.path, line: 999 } }), { code: "INVALID_POSITION" });
+});
+
+test("line-only navigation selects the innermost member on a single-line declaration", async () => {
+  const oneLine = { ...snapshot, content: "class A { int x; }" };
+  const member = { name: "x", kind: 8, range: { start: { line: 0, character: 10 }, end: { line: 0, character: 16 } }, selectionRange: { start: { line: 0, character: 14 }, end: { line: 0, character: 15 } } };
+  const declarations = [{ name: "A", kind: 5, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 18 } }, selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 7 } }, children: [member] }];
+  let selected: { line: number; character: number } | undefined;
+  const client = {
+    state: "ready", waitReady: async () => true, extendedOutline: async () => declarations,
+    references: async (_uri: string, position: { line: number; character: number }) => { selected = position; return []; },
+  } as unknown as LspClient;
+  const localSync = { ...sync, verify: async () => oneLine } as unknown as WorkspaceSynchronizer;
+  await new JavaService(config, paths, localSync, client).references({ target: { path: snapshot.path, line: 1 }, includeDeclaration: false, scope: "workspace", includeEnclosing: false, includeText: false, contextLines: 0, maxSnippetCharacters: 1000, limit: 50, includeTotal: false });
+  assert.deepEqual(selected, member.selectionRange.start);
+});
+
 test("reference filters use semantic read/write highlights and can include bounded context", async () => {
   const client = { state: "ready", waitReady: async () => true, references: async () => [{ uri: snapshot.uri, range: writeRange }, { uri: snapshot.uri, range: readRange }], documentHighlights: async () => [{ range: writeRange, kind: 3 }, { range: readRange, kind: 2 }], extendedOutline: async () => outline } as unknown as LspClient;
-  const result = await new JavaService(config, paths, sync, client).references({ target: { path: snapshot.path, line: 2, column: 7 }, includeDeclaration: false, scope: "workspace", usageKinds: ["read"], includeEnclosing: true, includeText: false, contextLines: 1, maxSnippetCharacters: 1000, limit: 50, includeTotal: false }) as { references: Array<Record<string, unknown>> };
+  const result = await new JavaService(config, paths, sync, client).references({ target: { path: snapshot.path, line: 2 }, includeDeclaration: false, scope: "workspace", usageKinds: ["read"], includeEnclosing: true, includeText: false, contextLines: 1, maxSnippetCharacters: 1000, limit: 50, includeTotal: false }) as { references: Array<Record<string, unknown>> };
   assert.equal(result.references.length, 1);
   assert.equal(result.references[0]!.usageKind, "read");
   assert.deepEqual(result.references[0]!.enclosing, { kind: "method", name: "m()", startLine: 3, endLine: 5 });
@@ -74,12 +129,12 @@ test("incoming call hierarchy filters test callers before applying per-node limi
   const testCaller = { name: "testCaller()", kind: 6, uri: "file:///workspace/test/ATest.java", range: methodRange, selectionRange: methodRange };
   const productionCaller = { name: "productionCaller()", kind: 6, uri: "file:///workspace/src/B.java", range: methodRange, selectionRange: methodRange };
   const client = {
-    state: "ready", waitReady: async () => true, prepareCall: async () => [root], callIncoming: async () => [{ from: testCaller }, { from: productionCaller }],
+    state: "ready", waitReady: async () => true, extendedOutline: async () => outline, prepareCall: async () => [root], callIncoming: async () => [{ from: testCaller }, { from: productionCaller }],
     isTestFile: async (uri: string) => uri === testCaller.uri,
   } as unknown as LspClient;
   const localPaths = { resolve: () => "C:/workspace/src/A.java", fromUri: (uri: string) => ({ path: uri.split("/workspace/")[1] ?? uri, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
   const service = new JavaService(config, localPaths, sync, client);
-  const request = { target: { path: snapshot.path, line: 3, column: 8 }, direction: "incoming" as const, depth: 1, limitPerNode: 1, limit: 50, includeTotal: true };
+  const request = { target: { path: snapshot.path, line: 3 }, direction: "incoming" as const, depth: 1, limitPerNode: 1, limit: 50, includeTotal: true };
 
   const production = await service.callHierarchy({ ...request, callerScope: "production" }) as { nodes: Array<{ name: string }> };
   const tests = await service.callHierarchy({ ...request, callerScope: "tests" }) as { nodes: Array<{ name: string }> };

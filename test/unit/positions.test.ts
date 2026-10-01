@@ -12,6 +12,14 @@ test("converts UTF-16 columns to one-based Unicode code-point columns", () => {
   assert.throws(() => utf16ToCodePointColumn(line, 2), /surrogate/u);
 });
 
+test("clamps out-of-range columns to the end of the line", () => {
+  const line = "a😀β";
+  assert.equal(codePointToUtf16Column(line, 1), 0);
+  assert.equal(codePointToUtf16Column(line, 4), 4);
+  assert.equal(codePointToUtf16Column(line, 100), 4);
+  assert.equal(codePointToUtf16Column("plain", 999), 5);
+});
+
 test("splits LF and CRLF without leaking carriage returns", () => {
   assert.deepEqual(lines("one\r\ntwo\nthree"), ["one", "two", "three"]);
 });

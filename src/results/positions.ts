@@ -16,14 +16,13 @@ export function utf16ToCodePointColumn(line: string, utf16Column: number): numbe
 
 export function codePointToUtf16Column(line: string, publicColumn: number): number {
   if (!Number.isInteger(publicColumn) || publicColumn < 1) throw new RangeError("Column must be a positive integer");
-  const wanted = publicColumn - 1;
+  const wanted = Math.min(publicColumn - 1, line.length);
   let points = 0, units = 0;
   for (const char of line) {
     if (points === wanted) return units;
     points++; units += char.length;
   }
-  if (points === wanted) return units;
-  throw new RangeError("Column exceeds line length");
+  return units;
 }
 
 export function lines(content: string): string[] { return content.split(/\r\n|\n|\r/u); }

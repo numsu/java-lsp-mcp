@@ -146,10 +146,12 @@ test("JDI bridge drives breakpoints, filtering, stale stops, and pending executi
   assert.equal(details.location.className, "Target"); assert.equal(details.location.methodName, "main"); assert.equal(details.location.line, 9);
   assert.match(String(stale.payload.message), /stale/u);
 
-  const cleared = outputs.java_debug_set_breakpoints.parse(await bridge.ok("breakpoints", 30_000, sessionId, targetSource, "", "2000")) as { breakpoints: unknown[] };
+  const cleared = outputs.java_debug_set_breakpoints.parse(await bridge.ok("breakpoints", 30_000, sessionId, targetSource.replaceAll("/", "\\"), "", "2000")) as { breakpoints: unknown[] };
   assert.deepEqual(cleared.breakpoints, []);
   const running = outputs.java_debug_execute.parse(await bridge.ok("execute", 30_000, sessionId, "continue", "", "", "0")) as { outcome: string; activeRequest?: { action: string } };
   assert.equal(running.outcome, "running"); assert.equal(running.activeRequest?.action, "continue");
+  const afterClear = outputs.java_debug_wait_for_stop.parse(await bridge.ok("wait", 30_000, sessionId, "250"));
+  assert.equal(afterClear.outcome, "timeout", "clearing a path variant must remove the installed breakpoint");
   const pending = await bridge.request("execute", 30_000, sessionId, "continue", "", "", "0");
   assert.equal(pending.status, "ERR"); assert.equal(pending.payload.code, "EXECUTION_REQUEST_PENDING");
   const sessions = outputs.java_debug_sessions.parse(await bridge.ok("sessions", 30_000)) as { sessions: Array<{ sessionId: string; state: string; activeRequest?: { action: string } }> };

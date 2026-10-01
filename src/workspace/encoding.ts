@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { Logger } from "../logging.js";
 import { JavaLspMcpError } from "../types.js";
 import type { WorkspacePaths } from "./paths.js";
 
@@ -12,8 +13,10 @@ const aliases: Record<string, string> = {
   latin1: "windows-1252",
 };
 
+interface DecodedSource { content: string; warning?: { code: string; message: string } }
+
 export class SourceDecoder {
-  constructor(private readonly paths: WorkspacePaths, private readonly override?: string) {
+  constructor(private readonly paths: WorkspacePaths, private readonly override?: string, private readonly logger = new Logger("warn")) {
     if (override) createDecoder(override);
   }
 
@@ -21,24 +24,22 @@ export class SourceDecoder {
     const bytes = await readFile(path);
     const configured = this.override ?? await this.eclipseEncoding(path);
     if (configured) return decode(bytes, configured, path);
-    try { return new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-    catch { throw new JavaLspMcpError("SOURCE_ENCODING_REQUIRED", `Source file is not valid UTF-8: ${this.paths.relative(path)}. Configure Eclipse project encoding or restart with --source-encoding <encoding>`); }
+    const decoded = decodeDefault(bytes);
+    if (decoded.warning) this.logger.warn(decoded.warning.message, { code: decoded.warning.code, path: this.paths.relative(path) });
+    return decoded.content;
   }
 
-  async readLenient(path: string): Promise<{ content: string; warning?: { code: string; message: string } }> {
+  async readLenient(path: string): Promise<DecodedSource> {
     const bytes = await readFile(path);
     const configured = this.override ?? await this.eclipseEncoding(path);
     if (configured) {
       try { return { content: decode(bytes, configured, path) }; }
       catch (error) {
         if (!(error instanceof JavaLspMcpError) || error.code === "UNSUPPORTED_SOURCE_ENCODING") throw error;
-        return { content: new TextDecoder("windows-1252").decode(bytes), warning: { code: error.code, message: `Source could not be decoded as ${configured}; Windows-1252 was used only for declaration indexing` } };
+        return { content: decodeBytes(bytes, createDecoder("windows-1252")), warning: { code: error.code, message: `Source could not be decoded as ${configured}; Windows-1252 was used only for declaration indexing` } };
       }
     }
-    try { return { content: new TextDecoder("utf-8", { fatal: true }).decode(bytes) }; }
-    catch {
-      return { content: new TextDecoder("windows-1252").decode(bytes), warning: { code: "SOURCE_ENCODING_FALLBACK", message: "Source is not valid UTF-8; Windows-1252 was used for declaration indexing. Configure Eclipse project encoding or --source-encoding for exact source text" } };
-    }
+    return decodeDefault(bytes);
   }
 
   private async eclipseEncoding(path: string): Promise<string | undefined> {
@@ -54,6 +55,14 @@ export class SourceDecoder {
       if (parent === directory || !this.paths.contains(parent)) return undefined;
       directory = parent;
     }
+  }
+}
+
+function decodeDefault(bytes: Uint8Array): DecodedSource {
+  try { return { content: decodeBytes(bytes, createDecoder("utf-8")) }; }
+  catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+    return { content: decodeBytes(bytes, createDecoder("windows-1252")), warning: { code: "SOURCE_ENCODING_FALLBACK", message: "Source is not valid UTF-8; Windows-1252 was used. Configure Eclipse project encoding or --source-encoding if a different encoding is needed" } };
   }
 }
 
@@ -79,8 +88,13 @@ function createDecoder(label: string): TextDecoder {
   catch { throw new JavaLspMcpError("UNSUPPORTED_SOURCE_ENCODING", `Unsupported source encoding: ${label}`); }
 }
 
+function decodeBytes(bytes: Uint8Array, decoder: TextDecoder): string {
+  // Streaming avoids Node's Windows-1252 fast path decoding C1 bytes as Latin-1.
+  return decoder.decode(bytes, { stream: true }) + decoder.decode();
+}
+
 function decode(bytes: Uint8Array, encoding: string, path: string): string {
-  try { return createDecoder(encoding).decode(bytes); }
+  try { return decodeBytes(bytes, createDecoder(encoding)); }
   catch (error) {
     if (error instanceof JavaLspMcpError) throw error;
     throw new JavaLspMcpError("SOURCE_DECODING_FAILED", `Could not decode ${path} as ${encoding}`);

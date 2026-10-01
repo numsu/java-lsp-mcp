@@ -14,7 +14,7 @@ test("definition omits whitespace-only documentation", async () => {
   const paths = { fromUri: () => ({ path: snapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
   const sync = { indexGeneration: 1, verify: async () => snapshot, flush: async () => {}, snapshots: { get: () => snapshot, getByUri: () => snapshot } } as unknown as WorkspaceSynchronizer;
   const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
-  const result = await new JavaService(config, paths, sync, client).definition({ target: { path: snapshot.path, line: 1, column: 7 }, expand: [], contextLines: 10, maxSourceCharacters: 4000, includeDocumentation: true, maxDocumentationCharacters: 1000, limit: 50, includeTotal: false }) as { documentation?: string; definitions: Array<Record<string, unknown>> };
+  const result = await new JavaService(config, paths, sync, client).definition({ target: { path: snapshot.path, line: 1 }, expand: [], contextLines: 10, maxSourceCharacters: 4000, includeDocumentation: true, maxDocumentationCharacters: 1000, limit: 50, includeTotal: false }) as { documentation?: string; definitions: Array<Record<string, unknown>> };
   assert.equal(result.documentation, undefined);
   assert.deepEqual(result.definitions[0], { path: snapshot.path, line: 1, column: 7, endLine: 1, endColumn: 8, kind: "class", name: "A", declarationStartLine: 1, declarationEndLine: 1 });
 });

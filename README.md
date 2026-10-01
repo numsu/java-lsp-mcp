@@ -59,21 +59,25 @@ Flags for `serve` (a `java-lsp-mcp.json` or `java-lsp-mcp.toml` file in the work
 | `--offline` | Never touch the network; Maven/Gradle resolve from caches only. |
 | `--exclude-project` | Leave a module out of import, compilation, and tests (repeatable). |
 | `--test-classpath-entry` | Extra directory or jar on the test runtime classpath (repeatable). |
-| `--source-encoding` | Override file-encoding detection when the project has no Eclipse settings. |
+| `--source-encoding` | Override Eclipse resource settings and automatic UTF-8/Windows-1252 source decoding. |
 | `--timeout`, `--result-budget` | Shared operation timeout in ms and per-result output budget in bytes. |
 | `--log-level`, `--max-heap`, `--result-mode` | Operational tuning; all logs go to stderr, never stdout. |
+
+Source reads honor `--source-encoding` first, then Eclipse resource encoding settings. Without either, valid UTF-8 is preserved and other source files are read as Windows-1252, with a `SOURCE_ENCODING_FALLBACK` warning on stderr. Source files are never converted or modified. Set the encoding explicitly for other legacy encodings; invalid or unsupported explicit encodings still report errors.
 
 Other commands: `doctor` checks the setup, `version` prints versions, `describe-tools` prints the complete machine-readable tool schemas, `print-config` generates client configuration, and `clear-cache` wipes the workspace index.
 
 ## Tools
 
+Source-based tools support the encoding fallback above. Symbol targets accept either `qualifiedName` or `path` plus a required one-based `line`. Omit `column` to select the innermost declaration enclosing that line; supply a one-based Unicode code-point `column` for an exact position. Columns beyond the line are clamped to its end.
+
 | Tool | Purpose |
 |---|---|
 | `java_status` | Readiness and runtime status |
 | `java_outline` | Source declarations |
-| `java_search_symbols` | Workspace and dependency symbols |
-| `java_find_definition` | Symbol declarations |
-| `java_find_references` | Semantic usages |
+| `java_search_symbols` | Workspace and dependency symbols; omit `line` for every match, pass `line` to keep only the nearest declaration |
+| `java_find_definition` | Symbol declarations; target by qualified name or file path + source line |
+| `java_find_references` | Semantic usages; target by qualified name or file path + source line |
 | `java_call_hierarchy` | Callers and callees; incoming callers default to production scope |
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
 | `java_diagnostics` | Current-snapshot diagnostics; fails fast with `JDT_BUSY` when JDT is busy and diagnostics are stale |
@@ -86,7 +90,7 @@ Other commands: `doctor` checks the setup, `version` prints versions, `describe-
 | `java_edit_preview` | Rename, action, import, format previews |
 | `java_debug_targets` | Discover local JVMs started with the JDWP agent |
 | `java_debug_attach`, `java_debug_sessions`, `java_debug_detach` | JDWP debug-session lifecycle |
-| `java_debug_set_breakpoints`, `java_debug_wait_for_stop` | Source breakpoints and bounded stop-event waits |
+| `java_debug_set_breakpoints`, `java_debug_wait_for_stop` | Replace source breakpoints (slash/backslash paths identify the same file) and bounded stop-event waits |
 | `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Filtered runtime thread/stack, local, collection, and object inspection |
 | `java_debug_execute` | Continue and step over, into, or out |
 | `java_debug_hot_swap` | ECJ/JDI Hot Code Replace with change and active-frame reporting |
