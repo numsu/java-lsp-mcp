@@ -1,23 +1,26 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter } from "vscode-jsonrpc/node.js";
 import type { Config } from "../config/config.js";
 import type { Logger } from "../logging.js";
 import { resolveRuntime, workspaceCacheDirectory } from "../runtime/resolver.js";
 import { LspClient } from "./client.js";
+import { waitForRecoverableWorkspaceFailure, workspaceLogOffset } from "./workspace-recovery.js";
 
 export class JdtSupervisor {
   readonly client: LspClient;
   private child?: ChildProcessWithoutNullStreams;
   private stopping = false;
   private restarts = 0;
+  private recoveredWorkspace = false;
   private dataDir = "";
   constructor(private readonly config: Config, private readonly logger: Logger) { this.client = new LspClient(undefined, config, logger); }
   async start(): Promise<void> {
     const runtime = resolveRuntime(this.config);
     this.dataDir = workspaceCacheDirectory(this.config);
     await mkdir(this.dataDir, { recursive: true });
+    const logOffset = await workspaceLogOffset(this.dataDir);
     const args = [
       "-Declipse.application=org.eclipse.jdt.ls.core.id1", "-Dosgi.bundles.defaultStartLevel=4", "-Declipse.product=org.eclipse.jdt.ls.core.product",
       "-Dlog.level=WARNING", "-Djava.import.generatesMetadataFilesAtProjectRoot=false", ...(this.config.sourceEncoding ? [`-Dfile.encoding=${this.config.sourceEncoding}`] : []), `-Xmx${this.config.maxHeap}`,
@@ -29,8 +32,25 @@ export class JdtSupervisor {
     child.stderr.on("data", chunk => this.logger.warn("JDT LS", String(chunk).trim()));
     const connection = createMessageConnection(new StreamMessageReader(child.stdout), new StreamMessageWriter(child.stdin));
     this.client.attach(connection); connection.listen();
-    try { await this.client.initialize(pathToFileURL(this.config.workspace).href, process.pid, this.config.timeoutMs); }
-    catch (error) { connection.dispose(); if (child.exitCode === null) child.kill(); this.client.state = "failed"; this.client.statusMessage = error instanceof Error ? error.message : String(error); throw error; }
+    const recoveryController = new AbortController();
+    const recovery = waitForRecoverableWorkspaceFailure(this.dataDir, logOffset, recoveryController.signal).then(found => {
+      if (found) throw new RecoverableWorkspaceError();
+      return new Promise<never>(() => {});
+    });
+    try { await Promise.race([this.client.initialize(pathToFileURL(this.config.workspace).href, process.pid, this.config.timeoutMs), recovery]); }
+    catch (error) {
+      recoveryController.abort();
+      connection.dispose();
+      await terminate(child);
+      if (error instanceof RecoverableWorkspaceError && !this.recoveredWorkspace) {
+        this.recoveredWorkspace = true;
+        this.logger.warn("Eclipse workspace metadata is inconsistent; rebuilding the JDT cache", { dataDir: this.dataDir });
+        await rm(this.dataDir, { recursive: true, force: true });
+        await this.start();
+        return;
+      }
+      this.client.state = "failed"; this.client.statusMessage = error instanceof Error ? error.message : String(error); throw error;
+    } finally { recoveryController.abort(); }
     if (child.exitCode === null) child.once("exit", (code, signal) => void this.onExit(code, signal));
     else void this.onExit(child.exitCode, child.signalCode);
   }
@@ -41,4 +61,12 @@ export class JdtSupervisor {
     else { this.client.state = "failed"; this.client.statusMessage = `JDT LS repeatedly exited (${code ?? signal ?? "unknown"})`; }
   }
   async stop(): Promise<void> { this.stopping = true; await this.client.shutdown(); if (this.child && this.child.exitCode === null) { const child = this.child; child.kill(); await Promise.race([new Promise<void>(resolve => child.once("exit", () => resolve())), new Promise<void>(resolve => setTimeout(resolve, 2_000))]); } }
+}
+
+class RecoverableWorkspaceError extends Error {}
+
+async function terminate(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill();
+  if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("exit", () => resolve()));
 }

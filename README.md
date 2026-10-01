@@ -67,6 +67,8 @@ Source reads honor `--source-encoding` first, then Eclipse resource encoding set
 
 Other commands: `doctor` checks the setup, `version` prints versions, `describe-tools` prints the complete machine-readable tool schemas, `print-config` generates client configuration, and `clear-cache` wipes the workspace index.
 
+If Eclipse cannot restore cached workspace metadata because a generated resource disappeared, the server detects the failed recovery, rebuilds its JDT cache once, and retries startup.
+
 ## Tools
 
 Source-based tools support the encoding fallback above. Symbol targets accept either `qualifiedName` or `path` plus a required one-based `line`. Omit `column` to select the innermost declaration enclosing that line; supply a one-based Unicode code-point `column` for an exact position. Columns beyond the line are clamped to its end.
