@@ -77,15 +77,15 @@ Source-based tools support the encoding fallback above. Symbol targets accept ei
 |---|---|
 | `java_status` | Readiness and runtime status |
 | `java_outline` | Source declarations |
-| `java_search_symbols` | Workspace and dependency symbols; omit `line` for every match, pass `line` to keep only the nearest declaration |
-| `java_find_definition` | Symbol declarations; target by qualified name or file path + source line |
-| `java_find_references` | Semantic usages; target by qualified name or file path + source line |
+| `java_search_symbols` | Batch workspace/dependency symbols with cached pagination; omit `line` for every match, pass `line` to keep only the nearest declaration |
+| `java_find_definition` | Batch symbol declarations; target by qualified name or file path + source line |
+| `java_find_references` | Semantic usages with cached pagination; target by qualified name or file path + source line |
 | `java_call_hierarchy` | Callers and callees; incoming callers default to production scope |
 | `java_type_hierarchy` | Supertypes, subtypes, implementations |
 | `java_diagnostics` | Current-snapshot diagnostics; fails fast with `JDT_BUSY` when JDT is busy and diagnostics are stale |
-| `java_compile` | ECJ workspace compilation with automatic loaded-prerequisite recovery |
+| `java_compile` | ECJ compilation with diagnostics, prerequisite recovery, and one clean retry when no syntax errors are confirmed |
 | `java_update_projects` | Maven/Gradle configuration re-sync into JDT (`force` for full reimport) |
-| `java_run_tests` | JUnit execution or suspended JDWP debug launch (`debug: true`) |
+| `java_run_tests` | JUnit execution after automatic incremental compilation/recovery; persistent compile failures include diagnostics; `debug: true` launches suspended JDWP |
 | `java_find_affected_tests` | Statically connected tests |
 | `java_find_unused_code` | Candidate unused private members |
 | `java_code_actions` | Available fixes and refactorings |
@@ -96,6 +96,24 @@ Source-based tools support the encoding fallback above. Symbol targets accept ei
 | `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Filtered runtime thread/stack, local, collection, and object inspection |
 | `java_debug_execute` | Continue and step over, into, or out |
 | `java_debug_hot_swap` | ECJ/JDI Hot Code Replace with change and active-frame reporting |
+
+`java_search_symbols` and `java_find_definition` require a `queries` array of 1–20 parameter objects. Batch related lookups to gather context in one call. Each entry has its own options, defaults, limit, and cursor. The response contains `results` in input order; failed entries contain `error` with `code`, `message`, and optional `details`, while other entries still complete. Top-level single-query parameters are rejected.
+
+```json
+{"queries":[{"query":"OrderService"},{"query":"Customer","scope":"all"}]}
+```
+
+```json
+{"queries":[{"target":{"qualifiedName":"com.example.OrderService"},"expand":["body"]},{"target":{"path":"src/Customer.java","line":12}}]}
+```
+
+Symbol search and reference lookups retain independent result snapshots when another page is available. Subsequent pages reuse the collected matches and reference usage classification; a fresh request without a cursor performs a new lookup. The shared cache expires entries **two minutes after creation** and uses LRU eviction with limits of **32 result sets and 16 MiB of serialized results**. Access does not extend expiry. Workspace changes and JDT reconnects invalidate cached continuations. An expired or evicted snapshot returns `STALE_RESULT_SET`; restart without a cursor. Results exceeding the cache byte limit bypass caching and retain ordinary pagination.
+
+Source verification reads, decodes, and hashes each Java file once per verification, reusing the synchronized snapshot. Unchanged verification still offers the document to JDT (including retrying a failed initial synchronization) and avoids unnecessary watched-file change notifications.
+
+Compilation retries an unsuccessful incremental build once as a clean build when current diagnostics contain no confirmed JDT syntax-error codes. Syntax errors are checked before severity filtering or pagination. Both attempts share the compilation timeout and preserve project exclusions and `compileProjectOnly` scope, including loaded prerequisites. Explicit clean builds, cancellation, unknown statuses, and request/configuration failures do not trigger a retry. `java_compile.buildAttempts` records the attempted build kinds and statuses; its diagnostics describe the final result.
+
+`java_run_tests` compiles incrementally by default and uses the same recovery policy before launching tests. Successful builds are reused until the workspace generation changes; `compile: "none"` still skips compilation and `compile: "clean"` requests a clean build directly. Normal test results include `buildAttempts` (empty when a build was reused). Persistent build failures return `status: "compile-failed"` and a `compilation` object with build status, attempts, diagnostic counts, locations/messages, total, and `diagnosticsTruncated` for the bounded diagnostic sample. Test counts and test failures remain separate from compiler diagnostics. Debug launches use the same build policy; failed builds return compiler details in the tool error.
 
 Run `java-lsp-mcp describe-tools` for the complete machine-readable tool schemas.
 

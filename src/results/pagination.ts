@@ -1,14 +1,17 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { JavaLspMcpError } from "../types.js";
 
-interface CursorData { q: string; o: number; g: number; e: number }
+interface CursorData { q: string; o: number; g: number; e: number; s?: string }
 export class CursorSigner {
   constructor(private readonly secret = randomBytes(32), private readonly ttlMs = 300_000) {}
-  sign(queryFingerprint: string, offset: number, generation: number, now = Date.now()): string {
-    const body = Buffer.from(JSON.stringify({ q: queryFingerprint, o: offset, g: generation, e: now + this.ttlMs } satisfies CursorData)).toString("base64url");
+  sign(queryFingerprint: string, offset: number, generation: number, now = Date.now(), snapshotId?: string): string {
+    const body = Buffer.from(JSON.stringify({ q: queryFingerprint, o: offset, g: generation, e: now + this.ttlMs, ...(snapshotId && { s: snapshotId }) } satisfies CursorData)).toString("base64url");
     return `${body}.${this.mac(body)}`;
   }
   verify(cursor: string, queryFingerprint: string, generation: number, now = Date.now()): number {
+    return this.verifyPage(cursor, queryFingerprint, generation, now).offset;
+  }
+  verifyPage(cursor: string, queryFingerprint: string, generation: number, now = Date.now()): { offset: number; snapshotId?: string } {
     const [body, signature, extra] = cursor.split(".");
     if (!body || !signature || extra) throw new JavaLspMcpError("INVALID_CURSOR", "Malformed cursor");
     const expected = Buffer.from(this.mac(body));
@@ -20,7 +23,8 @@ export class CursorSigner {
     if (data.q !== queryFingerprint) throw new JavaLspMcpError("CURSOR_QUERY_MISMATCH", "Cursor belongs to a different query");
     if (data.g !== generation) throw new JavaLspMcpError("STALE_CURSOR", "Workspace index changed; restart pagination");
     if (data.e < now) throw new JavaLspMcpError("EXPIRED_CURSOR", "Cursor expired");
-    return data.o;
+    if (!Number.isInteger(data.o) || data.o < 0 || data.s !== undefined && typeof data.s !== "string") throw new JavaLspMcpError("INVALID_CURSOR", "Malformed cursor payload");
+    return { offset: data.o, ...(data.s !== undefined && { snapshotId: data.s }) };
   }
   private mac(body: string): string { return createHmac("sha256", this.secret).update(body).digest("base64url"); }
 }

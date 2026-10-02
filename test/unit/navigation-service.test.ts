@@ -77,7 +77,7 @@ test("symbol search returns all matches and narrows to the nearest with a line h
 });
 
 test("path navigation targets require a line in their input schema", () => {
-  assert.equal(inputs.java_find_definition.safeParse({ target: { path: snapshot.path } }).success, false);
+  assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: snapshot.path } }] }).success, false);
   assert.equal(inputs.java_find_references.safeParse({ target: { path: snapshot.path } }).success, false);
 });
 
@@ -282,7 +282,7 @@ test("failed test compilation is not reused", async () => {
   const request = testRequest(snapshot.path, false);
   assert.equal((await service.runTests(request) as { status: string }).status, "compile-failed");
   assert.equal((await service.runTests(request) as { status: string }).status, "compile-failed");
-  assert.equal(builds, 2);
+  assert.equal(builds, 4);
 });
 
 test("runTests resolves a className-only selector via JDT symbols", async () => {
@@ -351,4 +351,33 @@ test("an unknown excluded project fails instead of silently building it", async 
   const result = await new JavaService({ ...config, workspace, excludedProjects: ["typo"] }, realPaths, localSync, client).compile({ kind: "incremental", minimumSeverity: "error", includeText: false, timeoutMs: 1000, limit: 100, includeTotal: false }) as { success: boolean; buildFailures?: string[] };
   assert.equal(result.success, false);
   assert.match(result.buildFailures?.[0] ?? "", /EXCLUDED_PROJECT_NOT_FOUND|Excluded project not found/u);
+});
+
+test("clean retries preserve exclusions and ignore syntax errors in excluded projects", async () => {
+  const workspace = resolve("test/fixtures/unmanaged"); const realPaths = new RealWorkspacePaths(workspace);
+  const logicUri = pathToFileURL(resolve(workspace, "logic")).href; const testsUri = pathToFileURL(resolve(workspace, "tests")).href;
+  const calls: Array<{ roots: string[]; clean: boolean }> = [];
+  const diagnostic = { range: fieldRange, severity: 1, code: "1610612960", source: "Java", message: "excluded syntax error" };
+  const client = { state: "ready", waitReady: async () => true, projects: async () => [logicUri, testsUri],
+    build: async () => { throw new Error("must not build excluded projects"); },
+    buildProjects: async (roots: string[], clean: boolean) => { calls.push({ roots, clean }); return clean ? 1 : 2; },
+    diagnostics: { currentEpoch: () => 1, settleAfter: async () => true, all: () => [{ uri: testsUri, epoch: 1, diagnostics: [diagnostic], receivedAt: 1 }] } } as unknown as LspClient;
+  const localSync = { indexGeneration: 1, flush: async () => {}, snapshots: { get: () => undefined, getByUri: () => undefined, all: () => [] } } as unknown as WorkspaceSynchronizer;
+  const result = await new JavaService({ ...config, workspace, excludedProjects: ["tests"] }, realPaths, localSync, client).compile({ kind: "incremental", minimumSeverity: "error", includeText: false, timeoutMs: 1000, limit: 100, includeTotal: false }) as { success: boolean };
+  assert.equal(result.success, true);
+  assert.deepEqual(calls, [{ roots: [logicUri], clean: false }, { roots: [logicUri], clean: true }]);
+});
+
+test("test clean recovery preserves project-only scope and ignores unrelated syntax errors", async () => {
+  const workspace = resolve("test/fixtures/unmanaged"); const logicUri = pathToFileURL(resolve(workspace, "logic")).href; const testsUri = pathToFileURL(resolve(workspace, "tests")).href;
+  const localSnapshot = { ...snapshot, path: "tests/src/A.java", uri: pathToFileURL(resolve(workspace, "tests/src/A.java")).href };
+  const calls: Array<{ roots: string[]; clean: boolean }> = [];
+  const client = { state: "ready", waitReady: async () => true, isTestFile: async () => true, projects: async () => [logicUri, testsUri],
+    build: async () => { throw new Error("must not build whole workspace"); },
+    buildProjects: async (roots: string[], clean: boolean) => { calls.push({ roots, clean }); return clean ? 1 : 2; },
+    diagnostics: { currentEpoch: () => 1, settleAfter: async () => true, all: () => [{ uri: logicUri, diagnostics: [{ range: fieldRange, severity: 1, code: "1610612960", source: "Java", message: "unrelated syntax error" }] }] }, testClasspaths: async () => ({}) } as unknown as LspClient;
+  const localSync = { indexGeneration: 1, verify: async () => localSnapshot, flush: async () => {}, snapshots: { all: () => [localSnapshot] } } as unknown as WorkspaceSynchronizer;
+  const localPaths = { root: workspace, fromUri: () => ({ path: localSnapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
+  await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(testRequest(localSnapshot.path, true)), /no test runtime classpath/u);
+  assert.deepEqual(calls, [{ roots: [testsUri], clean: false }, { roots: [testsUri], clean: true }]);
 });

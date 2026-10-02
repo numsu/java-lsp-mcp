@@ -65,7 +65,9 @@ test("reattaching clears connection-specific documents and diagnostics", async (
   client.attach(connection([], firstNotifications));
   const snapshot: Snapshot = { path: "src/A.java", uri: pathToFileURL(resolve(config.workspace, "src/A.java")).href, content: "class A {}", hash: "one", version: 1, mtimeMs: 1 };
   await client.syncDocument(snapshot); client.diagnostics.publish(snapshot.uri, [], 1);
+  const priorSession = client.sessionGeneration;
   const secondNotifications: Array<{ method: string; params: unknown }> = []; client.attach(connection([], secondNotifications)); await client.syncDocument(snapshot);
+  assert.equal(client.sessionGeneration, priorSession + 1);
   assert.equal(secondNotifications[0]?.method, "textDocument/didOpen");
   assert.equal(client.diagnostics.get(snapshot.uri), undefined);
 });

@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { inputs, outputs } from "../../src/mcp/schemas.js";
-test("symbol target is a strict discriminated union", () => { assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", line: 1, column: 5 } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { qualifiedName: "A" } }).success, true); assert.equal(inputs.java_find_definition.safeParse({ target: { path: "A.java", qualifiedName: "A" } }).success, false); });
-test("limits are bounded", () => assert.equal(inputs.java_search_symbols.safeParse({ query: "A", limit: 201 }).success, false));
+test("symbol target is a strict discriminated union", () => { assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: "A.java", line: 1 } }] }).success, true); assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: "A.java", line: 1, column: 5 } }] }).success, true); assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { qualifiedName: "A" } }] }).success, true); assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: "A.java", qualifiedName: "A" } }] }).success, false); });
+test("limits are bounded", () => assert.equal(inputs.java_search_symbols.safeParse({ queries: [{ query: "A", limit: 201 }] }).success, false));
 test("search line hints are optional and positive integers", () => {
-  assert.equal(inputs.java_search_symbols.parse({ query: "A" }).line, undefined);
-  assert.equal(inputs.java_search_symbols.parse({ query: "A", line: 42 }).line, 42);
-  for (const line of [0, -1, 1.5]) assert.equal(inputs.java_search_symbols.safeParse({ query: "A", line }).success, false);
+  assert.equal(inputs.java_search_symbols.parse({ queries: [{ query: "A" }] }).queries[0]!.line, undefined);
+  assert.equal(inputs.java_search_symbols.parse({ queries: [{ query: "A", line: 42 }] }).queries[0]!.line, 42);
+  for (const line of [0, -1, 1.5]) assert.equal(inputs.java_search_symbols.safeParse({ queries: [{ query: "A", line }] }).success, false);
 });
 test("source ranges are ordered and diagnostic scope parameters are unambiguous", () => {
   assert.equal(inputs.java_code_actions.safeParse({ path: "A.java", range: { line: 2, column: 1, endLine: 1, endColumn: 1 } }).success, false);
@@ -27,12 +27,12 @@ test("source text, totals, and edit diffs are opt-in", () => {
   assert.equal(references.contextLines, 0);
   assert.equal(references.includeEnclosing, false);
   assert.equal(references.usageKinds, undefined);
-  assert.deepEqual(inputs.java_find_definition.parse({ target }).expand, []);
+  assert.deepEqual(inputs.java_find_definition.parse({ queries: [{ target }] }).queries[0]!.expand, []);
   assert.equal(inputs.java_diagnostics.parse({ scope: "path", path: "src/Example.java" }).includeText, false);
   assert.equal(inputs.java_compile.parse({}).includeText, false);
   assert.equal(inputs.java_edit_preview.parse({ operation: "format", path: "src/Example.java" }).includeDiff, false);
-  assert.equal(inputs.java_search_symbols.parse({ query: "Example" }).includeTotal, false);
-  assert.equal(inputs.java_search_symbols.parse({ query: "Example" }).includeImplementation, false);
+  assert.equal(inputs.java_search_symbols.parse({ queries: [{ query: "Example" }] }).queries[0]!.includeTotal, false);
+  assert.equal(inputs.java_search_symbols.parse({ queries: [{ query: "Example" }] }).queries[0]!.includeImplementation, false);
 });
 test("status offers a bounded blocking readiness probe", () => {
   assert.deepEqual(inputs.java_status.parse({}), { waitForReady: false, timeoutMs: 120_000 });
@@ -82,4 +82,34 @@ test("debug tools enforce state handles and bounded waits", () => {
   assert.deepEqual(inputs.java_debug_hot_swap.parse({ sessionId: "s", sourcePaths: ["src/App.java"] }), { sessionId: "s", sourcePaths: ["src/App.java"], dryRun: false });
   assert.equal(outputs.java_debug_wait_for_stop.parse({ outcome: "timeout", sessionId: "s", targetId: "local:1", state: "stopped", stopId: "stop:1" }).stopId, "stop:1");
   assert.equal(outputs.java_debug_hot_swap.parse({ outcome: "applied", classes: [{ className: "p.App", status: "applied", changeType: "method_body" }], diagnostics: [], breakpoints: { restored: [], pending: [], rejected: [] }, activeFrames: [{ threadId: 1, className: "p.App", methodName: "run", obsolete: false, impact: "continues_old_bytecode" }] }).classes[0]?.changeType, "method_body");
+});
+
+
+test("navigation tools require bounded arrays with independently defaulted entries", () => {
+  for (const [schema, query] of [[inputs.java_search_symbols, { query: "A" }], [inputs.java_find_definition, { target: { qualifiedName: "A" } }]] as const) {
+    assert.equal(schema.safeParse(query).success, false);
+    assert.equal(schema.safeParse({ queries: [] }).success, false);
+    assert.equal(schema.safeParse({ queries: Array.from({ length: 21 }, () => query) }).success, false);
+    assert.equal(schema.safeParse({ queries: [query], ...query }).success, false);
+    assert.equal(schema.safeParse({ queries: [{ ...query, unknownOption: true }] }).success, false);
+    assert.equal(schema.safeParse({ queries: [query] }).success, true);
+  }
+  const search = inputs.java_search_symbols.parse({ queries: [{ query: "A", line: 42, limit: 1, cursor: "cursor-a", scope: "all" }, { query: "B", cursor: null }] }).queries;
+  assert.equal(search[0]!.scope, "all"); assert.equal(search[0]!.cursor, "cursor-a"); assert.equal(search[0]!.limit, 1);
+  assert.equal(search[1]!.scope, "workspace"); assert.equal(search[1]!.mode, "fuzzy"); assert.equal(search[1]!.limit, 50); assert.equal(search[1]!.cursor, undefined); assert.equal(search[1]!.line, undefined);
+  const definitions = inputs.java_find_definition.parse({ queries: [{ target: { qualifiedName: "A" }, expand: ["body"], includeDocumentation: true }, { target: { path: "B.java", line: 2 } }] }).queries;
+  assert.deepEqual(definitions[0]!.expand, ["body"]); assert.equal(definitions[0]!.includeDocumentation, true);
+  assert.deepEqual(definitions[1]!.expand, []); assert.equal(definitions[1]!.includeDocumentation, false); assert.equal(definitions[1]!.maxSourceCharacters, 4000);
+  assert.equal(inputs.java_search_symbols.safeParse({ queries: [{ query: "A" }, { query: "" }] }).success, false);
+  assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: "A.java" } }] }).success, false);
+});
+
+test("navigation batch output validates results and per-entry errors", () => {
+  const error = { error: { code: "SYMBOL_NOT_FOUND", message: "missing", details: { target: "Missing" } } };
+  assert.equal(outputs.java_search_symbols.safeParse({ results: [{ symbols: [], nextCursor: "next", total: 2, warnings: [{ code: "warning" }] }, error] }).success, true);
+  assert.equal(outputs.java_find_definition.safeParse({ results: [{ definitions: [], documentation: "docs" }, error] }).success, true);
+  assert.equal(outputs.java_search_symbols.safeParse({ symbols: [] }).success, false);
+  assert.equal(outputs.java_find_definition.safeParse({ definitions: [] }).success, false);
+  assert.equal(outputs.java_search_symbols.safeParse({ results: [{ error: { code: "bad" } }] }).success, false);
+  assert.equal(outputs.java_find_definition.safeParse({ results: [{ symbols: [] }] }).success, false);
 });

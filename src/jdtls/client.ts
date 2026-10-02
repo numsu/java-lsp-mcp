@@ -13,6 +13,7 @@ import { jdkExecutionEnvironment } from "../runtime/resolver.js";
 export type JdtState = "starting" | "importing" | "building" | "indexing" | "busy" | "ready" | "degraded" | "failed";
 
 export class LspClient {
+  sessionGeneration = 0;
   readonly diagnostics = new DiagnosticStore();
   state: JdtState = "starting";
   statusMessage = "Not started";
@@ -24,7 +25,7 @@ export class LspClient {
   private semanticProbe: Promise<void> | undefined;
   private readonly progress = new Map<string, string>();
   constructor(private connection: MessageConnection | undefined, private readonly config: Config, private readonly logger: Logger) {}
-  attach(connection: MessageConnection): void { this.connection = connection; this.opened.clear(); this.diagnostics.clear(); this.serviceReady = false; this.serviceReadyAt = 0; this.semanticReady = false; this.semanticProbe = undefined; this.progress.clear(); this.state = "starting"; this.registerHandlers(); }
+  attach(connection: MessageConnection): void { this.sessionGeneration++; this.connection = connection; this.opened.clear(); this.diagnostics.clear(); this.serviceReady = false; this.serviceReadyAt = 0; this.semanticReady = false; this.semanticProbe = undefined; this.progress.clear(); this.state = "starting"; this.registerHandlers(); }
   private registerHandlers(): void {
     const c = this.requireConnection();
     c.onRequest("workspace/configuration", (params: { items?: { section?: string }[] }) => { const settings = this.settings(); return (params.items ?? []).map(item => item.section ? configurationValue(settings, item.section) : settings); });

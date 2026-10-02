@@ -16,7 +16,7 @@ test("modern stdio discovery and static tools list", async () => {
   const { child, next } = start();
   try {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: meta } })}\n`); const discover = await next(); const result = discover.result as Record<string, unknown>; assert.deepEqual(result.supportedVersions, ["2026-07-28"]);
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } })}\n`); const listed = (await next()).result as { tools: Array<Record<string, unknown>> }; assert.equal(listed.tools.length, 26); assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 40_000); assert.equal((listed.tools[0]!.annotations as Record<string, unknown>).readOnlyHint, true); assert.equal("outputSchema" in listed.tools[0]!, false); const status = listed.tools.find(t => t.name === "java_status")!; assert.ok("waitForReady" in (status.inputSchema as { properties: Record<string, unknown> }).properties); const definition = listed.tools.find(t => t.name === "java_find_definition")!; const target = ((definition.inputSchema as { properties: Record<string, unknown> }).properties.target as Record<string, unknown>); assert.ok(Array.isArray(target.oneOf));
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: { _meta: meta } })}\n`); const listed = (await next()).result as { tools: Array<Record<string, unknown>> }; assert.equal(listed.tools.length, 26); assert.ok(Buffer.byteLength(JSON.stringify(listed)) < 40_000, `tool list size: ${Buffer.byteLength(JSON.stringify(listed))}`); assert.equal((listed.tools[0]!.annotations as Record<string, unknown>).readOnlyHint, true); assert.equal("outputSchema" in listed.tools[0]!, false); const status = listed.tools.find(t => t.name === "java_status")!; assert.ok("waitForReady" in (status.inputSchema as { properties: Record<string, unknown> }).properties); const definition = listed.tools.find(t => t.name === "java_find_definition")!; const target = (definition.inputSchema as { properties: { queries: { items: { properties: { target: Record<string, unknown> } } } } }).properties.queries.items.properties.target; assert.ok(Array.isArray(target.oneOf));
   } finally { child.kill(); }
 });
 async function handshakeOnce(message: object): Promise<{ response: Record<string, unknown>; stderr: string }> {
@@ -46,5 +46,16 @@ test("VS Code's 2025-11-25 initialize and tool callbacks are supported", async (
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "java_status", arguments: { waitForReady: true, timeoutMs: 100 } } })}\n`); const status = (await next()).result as { content: Array<{ text: string }>; structuredContent: { state: string }; isError?: boolean }; assert.notEqual(status.isError, true); assert.equal(status.structuredContent.state, "failed"); assert.equal(status.content[0]?.text, "failed"); assert.doesNotMatch(status.content[0]!.text, /java_status/u);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "java_outline", arguments: { path: "src/Overloads.java", depth: 2, visibility: ["public", "package", "private"], kinds: ["class", "constructor", "method"], format: "compact", limit: 100, cursor: null } } })}\n`); const tool = (await next()).result as { content: Array<{ text: string }>; isError?: boolean }; assert.equal(tool.isError, true); assert.match(tool.content[0]!.text, /JDT_NOT_READY/u); assert.doesNotMatch(tool.content[0]!.text, /reading 'aborted'/u);
+    for (const [name, queries] of [["java_search_symbols", [{ query: "A" }, { query: "B" }]], ["java_find_definition", [{ target: { qualifiedName: "A" } }, { target: { qualifiedName: "B" } }]]] as const) {
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: name, method: "tools/call", params: { name, arguments: { queries } } }) + "\n");
+      const batch = (await next()).result as { isError?: boolean; structuredContent: { results: Array<{ error: { code: string } }> }; content: Array<{ text: string }> };
+      assert.notEqual(batch.isError, true);
+      assert.equal(batch.structuredContent.results.length, 2);
+      assert.ok(batch.structuredContent.results.every(result => result.error.code === "JDT_NOT_READY"));
+      assert.match(batch.content[0]!.text, /1: JDT_NOT_READY/u);
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: name + "-invalid", method: "tools/call", params: { name, arguments: queries[0] } }) + "\n");
+      const invalid = await next();
+      assert.ok(invalid.error || (invalid.result as { isError?: boolean } | undefined)?.isError);
+    }
   } finally { child.kill(); }
 });

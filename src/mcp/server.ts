@@ -8,19 +8,20 @@ import { DebugService } from "../debug/service.js";
 import { inputs, outputs, type ToolName } from "./schemas.js";
 import { application } from "../version.js";
 
+const batchDescription = "Batch related lookups in queries (1–20 objects). Ordered results have independent options/pagination or per-entry errors. ";
 const sourceDecodingDescription = "Unconfigured source reads use UTF-8, falling back to Windows-1252 with a stderr warning for invalid UTF-8; Eclipse resource settings and --source-encoding take precedence.";
 export const descriptions: Record<ToolName, string> = {
   java_status: "Probe JDT readiness. ready=true means semantic requests are accepted; state=busy and activity describe current background work without revoking readiness. Before the first Java semantic request, call with waitForReady=true instead of using a fixed startup delay.",
   java_outline: `Return a filtered, paginated compact Java outline with declaration start/end lines and no method bodies. Set containingLine to return only its enclosing declaration chain. ${sourceDecodingDescription}`,
-  java_search_symbols: `Search JDT workspace/dependency symbols, supplemented by a cached workspace enum-constant index. All matches remain eligible by default, subject to pagination; pass line to keep only the symbol whose declaration is nearest that source line before pagination (ties keep the first match). Set includeImplementation=true to include up to the first 200 source lines and the full declaration start/end lines when exactly one workspace symbol matches after narrowing. Configured source decoding failures return the symbol plus warnings. ${sourceDecodingDescription} Use ordinary text search for strings, comments, configuration, and reflection names.`,
-  java_find_definition: `Resolve the exact semantic declaration and its full declaration line range. Source context, body, direct class members, and documentation are opt-in. Target by qualified name, or by file path with a required source line. Omit column to select the innermost declaration enclosing that line; pass column to target an exact source position, clamped to the line length. Qualified targets still return the semantic location when configured source decoding fails; source-derived expansion is then omitted. ${sourceDecodingDescription}`,
-  java_find_references: `Find semantic usages with optional call/read/write filtering, enclosing declarations, containing-symbol scope, and source snippets. Target by qualified name, or by file path with a required source line. Omit column to select the innermost declaration enclosing that line; pass column to target an exact source position, clamped to the line length. ${sourceDecodingDescription} Use text search for comments, strings, templates, configuration, and reflection names.`,
+  java_search_symbols: `${batchDescription}Search workspace/dependency symbols and cached enum constants. line keeps the nearest declaration before pagination (ties keep the first match); omit for all matches. includeImplementation=true adds up to 200 source lines and the declaration range for one workspace match. Decoding failures return warnings. Pages cache for 2 minutes; STALE_RESULT_SET means restart without cursor. Source uses UTF-8/Windows-1252 fallback with stderr warnings; Eclipse settings and --source-encoding override. Use text search for non-symbol text.`,
+  java_find_definition: `${batchDescription}Resolve semantic declarations and their full line ranges. Context, body, direct members, and documentation are opt-in. Target by qualified name or file path + required source line. Omit column to select the innermost declaration enclosing that line; pass column to target an exact source position, clamped to the line length. Qualified targets still return the semantic location when configured source decoding fails; source-derived expansion is then omitted. ${sourceDecodingDescription}`,
+  java_find_references: `Find semantic usages with call/read/write filters, enclosing declarations, containing-symbol scope, and source snippets. Target by qualifiedName or path + line; omit column for the enclosing declaration, or pass a one-based Unicode column for an exact position (clamped to line length). Pages cache for 2 minutes; STALE_RESULT_SET means restart without cursor. Source uses UTF-8/Windows-1252 fallback with stderr warnings; Eclipse settings and --source-encoding override. Use text search for comments, strings, configuration, and reflection names.`,
   java_call_hierarchy: "Find incoming callers or outgoing callees of a method or constructor as a bounded semantic graph. Incoming hierarchies exclude test callers by default; set callerScope=tests for test callers only or callerScope=all for both.",
   java_type_hierarchy: "Find semantic supertypes, subtypes, implementations, interfaces, and permitted subclasses.",
   java_diagnostics: "Return JDT/ECJ diagnostics for the exact synchronized content. All requested paths share one deadline; status=partial identifies paths whose current-version diagnostics were not published in time. Fails fast with JDT_BUSY instead of waiting the full timeout when JDT is starting, importing, building, indexing, or busy and current-version diagnostics are stale; the error details carry state, activity, and pendingPaths. Then call java_status with waitForReady=true and retry the pending paths; if pom.xml/build.gradle changed, call java_update_projects then java_compile. Use immediately after applying external patches.",
-  java_compile: "Run an Eclipse workspace build with ECJ in private state. Builds automatically build loaded prerequisite projects and retry blocked dependents. Build status is authoritative; diagnosticsComplete says whether error details were published by JDT. Use before declaring a Java change complete; Maven/Gradle lifecycle tests remain separate.",
+  java_compile: "Build the workspace with ECJ and return paginated diagnostics plus buildAttempts. Incremental failures retry clean once unless current diagnostics confirm syntax errors; both attempts share the timeout. Cancellation, unknown statuses, and request/configuration failures do not retry. Loaded prerequisites recover automatically. Build status is authoritative; diagnosticsComplete reports available error details. Use for final Java verification.",
   java_update_projects: "Re-read Maven (pom.xml) or Gradle (build.gradle/.kts) configuration into JDT without restarting, for dependency, source-root, or compiler-level changes. Updates the given workspace paths' projects; omit paths, pass all:true, or include \"*\" to update every non-excluded build descriptor found in the workspace. force=true runs a full workspace reimport instead, which also discovers added or removed modules but is slower. Requires --trust-workspace and may download dependencies. Call java_compile afterwards to rebuild.",
-  java_run_tests: "Run one selector with path/className/methodName or batch up to 100 selectors in tests. A top-level className or a tests entry with className may omit path; the server resolves the class to its workspace source via JDT symbols (ambiguous names fail and ask for path). Batch selectors, distinct classpath groups, and concurrent calls run in parallel after sharing compilation; do not batch tests that require exclusive shared resources. Set debug=true to launch the selected tests in a suspended JDWP JVM and return debug session ids immediately; set breakpoints first, then call java_debug_execute with action=continue and no stopId to release the initial startup suspension. Use the java_debug_* tools to inspect and continue, then run the same test normally for its result. Set compileProjectOnly=true to compile only selected JDT projects. Pass coverage={} to opt into JaCoCo; coverage.details=summary omits files, while files are independently paginated with coverage.limit/cursor. Prefer this for targeted unit tests; use Maven/Gradle when lifecycle plugins or integration-test setup matters.",
+  java_run_tests: "Run path/className/methodName or batch up to 100 selectors in tests; className may omit path (ambiguous names require path). Compile incrementally by default, reusing successful builds; failures retry clean once unless current diagnostics confirm syntax errors, within the compilation timeout. Persistent failures include compilation diagnostics (total/diagnosticsTruncated); buildAttempts is empty for reused builds. Cancellation, unknown statuses, and request/configuration failures do not retry. Batch/concurrent runs share compilation and execute in parallel; avoid tests needing exclusive resources. compileProjectOnly limits builds to selected projects and loaded prerequisites. debug=true launches suspended JDWP JVMs: set breakpoints, then java_debug_execute with action=continue and no stopId. coverage={} enables JaCoCo; coverage.details=summary omits files, otherwise coverage.limit/cursor paginates them. Use Maven/Gradle for lifecycle plugins or integration setup.",
   java_find_affected_tests: "Find JUnit/TestNG test methods that can statically reach a target through JDT call relationships. This selects fast candidate tests; it does not prove runtime coverage.",
   java_find_unused_code: "Find private methods, constructors, and fields with no semantic references, plus optionally write-only fields. Results are candidates because reflection and frameworks may access members implicitly.",
   java_code_actions: "List JDT quick fixes/refactorings and mint short-lived handles. Does not apply changes.",
@@ -69,8 +70,8 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   };
   register("java_status", i => service.status(i));
   register("java_outline", i => service.outline(i));
-  register("java_search_symbols", i => service.search(i));
-  register("java_find_definition", i => service.definition(i));
+  register("java_search_symbols", (i, signal) => runQueryBatch(i.queries, q => service.search(q), signal));
+  register("java_find_definition", (i, signal) => runQueryBatch(i.queries, q => service.definition(q), signal));
   register("java_find_references", i => service.references(i));
   register("java_call_hierarchy", i => service.callHierarchy(i));
   register("java_type_hierarchy", i => service.typeHierarchy(i));
@@ -94,6 +95,21 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   register("java_debug_detach", i => debuggerService.detach(i));
   register("java_debug_hot_swap", (i, signal) => debuggerService.hotSwap(i, signal));
   return server;
+}
+
+export async function runQueryBatch<T>(queries: readonly T[], handler: (query: T) => Promise<object>, signal: AbortSignal): Promise<{ results: object[] }> {
+  const results: object[] = [];
+  for (const query of queries) {
+    signal.throwIfAborted();
+    try {
+      results.push(await abortable(handler(query), signal));
+    } catch (error) {
+      signal.throwIfAborted();
+      const e = error instanceof JavaLspMcpError ? error : new JavaLspMcpError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
+      results.push({ error: { code: e.code, message: e.message, ...(e.details !== undefined && { details: e.details }) } });
+    }
+  }
+  return { results };
 }
 
 export function outputValidationError(name: ToolName, error: unknown, logger: Logger): JavaLspMcpError {
@@ -124,7 +140,7 @@ export function enforceToolBudget(name: ToolName, value: object, budget: number)
   return result;
 }
 
-function summary(value: Record<string, unknown>): string { if (value.status === "partial") return "partial; retry pending paths"; const count = ["symbols", "definitions", "references", "actions", "diagnostics", "files", "edges", "tests", "candidates"].map(key => value[key]).find(Array.isArray)?.length; if (typeof count === "number") return `${count} result${count === 1 ? "" : "s"}`; if (typeof value.state === "string") return value.state; return "complete"; }
+function summary(value: Record<string, unknown>): string { if (Array.isArray(value.results)) return value.results.map((item, index) => `${index + 1}: ${"error" in item ? `${item.error.code}: ${item.error.message}` : summary(item)}`).join("\n"); if (value.status === "partial") return "partial; retry pending paths"; const count = ["symbols", "definitions", "references", "actions", "diagnostics", "files", "edges", "tests", "candidates"].map(key => value[key]).find(Array.isArray)?.length; if (typeof count === "number") return `${count} result${count === 1 ? "" : "s"}`; if (typeof value.state === "string") return value.state; return "complete"; }
 function textResult(name: ToolName, value: Record<string, unknown>): string {
   if (name === "java_find_references") return ((value.references as Array<Record<string, unknown>> | undefined) ?? []).map(item => `${String(item.path)}:${String(item.line)}:${String(item.column)}: ${String(item.text ?? "")}`).join("\n") || "no results";
   if (name === "java_diagnostics") {

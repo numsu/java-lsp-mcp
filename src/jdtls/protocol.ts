@@ -1,7 +1,7 @@
 export interface Position { line: number; character: number }
 export interface Range { start: Position; end: Position }
 export interface Location { uri: string; range: Range }
-export interface Diagnostic { range: Range; severity?: number; code?: string | number; message: string; source?: string; tags?: number[]; relatedInformation?: { location: Location; message: string }[] }
+export interface Diagnostic { range: Range; severity?: number; code?: string | number; message: string; source?: string; data?: { ecjProblemId?: string | number }; tags?: number[]; relatedInformation?: { location: Location; message: string }[] }
 export interface SymbolInformation { name: string; kind: number; location: Location; containerName?: string }
 export interface DocumentSymbol { name: string; detail?: string; kind: number; range: Range; selectionRange: Range; children?: DocumentSymbol[]; tags?: number[] }
 export interface TextDocumentEdit { textDocument: { uri: string; version?: number }; edits: TextEdit[] }
