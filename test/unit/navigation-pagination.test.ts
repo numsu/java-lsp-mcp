@@ -24,7 +24,7 @@ function fixture() {
   return { calls, sync, client, service: new JavaService(config, paths, sync as unknown as WorkspaceSynchronizer, client as unknown as LspClient), setSymbols: (value: SymbolInformation[]) => { symbols = value; } };
 }
 const search = () => inputs.java_search_symbols.parse({ queries: [{ query: "A", limit: 1 }] }).queries[0]!;
-const references = () => inputs.java_find_references.parse({ target: { path: snapshot.path, line: 1, column: 1 }, limit: 1 });
+const references = () => inputs.java_find_references.parse({ queries: [{ target: { path: snapshot.path, line: 1, column: 1 }, limit: 1 }] }).queries[0]!;
 type Page = { symbols?: Array<{ name: string }>; references?: Array<{ line: number; usageKind?: string }>; total?: number; nextCursor?: string };
 
 for (const kind of ["search", "references"] as const) {
@@ -72,7 +72,7 @@ test("fresh identical searches keep independent snapshots for existing cursors",
 test("reference pages reuse target resolution, within outlines, and usage classification", async () => {
   const f = fixture();
   f.setSymbols([symbol("A", 0)]);
-  const input = inputs.java_find_references.parse({ target: { qualifiedName: "A" }, within: { path: snapshot.path, line: 1, column: 1 }, usageKinds: ["read"], limit: 1 });
+  const input = inputs.java_find_references.parse({ queries: [{ target: { qualifiedName: "A" }, within: { path: snapshot.path, line: 1, column: 1 }, usageKinds: ["read"], limit: 1 }] }).queries[0]!;
   const first = await f.service.references(input) as Page;
   const second = await f.service.references({ ...input, cursor: first.nextCursor }) as Page;
   assert.equal(second.references?.[0]?.usageKind, "read");

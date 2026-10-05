@@ -1,3 +1,7 @@
+import { SourceDecoder } from "../workspace/encoding.js";
+import { WorkspacePaths } from "../workspace/paths.js";
+import { clampSourceValue } from "../mcp/input-normalization.js";
+import { lines } from "../results/positions.js";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Config } from "../config/config.js";
@@ -9,11 +13,18 @@ import { launchJUnit } from "../testing/junit.js";
 
 export class DebugService {
   private readonly bridge: DebugBridgeClient;
-  constructor(private readonly config: Config, logger: Logger, private readonly java: JavaService) { this.bridge = new DebugBridgeClient(config, logger); }
+  private sourceDecoder?: SourceDecoder;
+  constructor(private readonly config: Config, private readonly logger: Logger, private readonly java: JavaService) { this.bridge = new DebugBridgeClient(config, logger); }
   targets(input: { query?: string | undefined; includeUnavailable: boolean }): Promise<object> { return this.bridge.request("targets", [input.query, input.includeUnavailable]); }
   attach(input: { targetId: string; timeoutMs: number }): Promise<object> { return this.bridge.request("attach", [input.targetId, input.timeoutMs], input.timeoutMs + 2_000); }
   sessions(): Promise<object> { return this.bridge.request("sessions"); }
-  setBreakpoints(input: { sessionId: string; sourcePath: string; breakpoints: Array<{ line: number }>; timeoutMs: number }): Promise<object> { return this.bridge.request("breakpoints", [input.sessionId, workspacePath(this.config.workspace, input.sourcePath), input.breakpoints.map(v => v.line).join(","), input.timeoutMs], input.timeoutMs + 2_000); }
+  async setBreakpoints(input: { sessionId: string; sourcePath: string; breakpoints: Array<{ line: number }>; timeoutMs: number }): Promise<object> {
+    const sourcePath = workspacePath(this.config.workspace, input.sourcePath);
+    const decoder = input.breakpoints.length ? this.sourceDecoder ??= new SourceDecoder(new WorkspacePaths(this.config.workspace), this.config.sourceEncoding, this.logger) : undefined;
+    const lineCount = decoder ? lines(await decoder.read(sourcePath)).length : 1;
+    const breakpoints = input.breakpoints.map(v => clampSourceValue(`${input.sourcePath}.line`, v.line, 1, lineCount));
+    return this.bridge.request("breakpoints", [input.sessionId, sourcePath, breakpoints.join(","), input.timeoutMs], input.timeoutMs + 2_000);
+  }
   threads(input: { sessionId: string; includeSystemThreads: boolean; packagePrefix?: string | undefined; namePattern?: string | undefined }): Promise<object> { return this.bridge.request("threads", [input.sessionId, input.includeSystemThreads, input.packagePrefix, input.namePattern]); }
   wait(input: { sessionId: string; timeoutMs: number }): Promise<object> { return this.bridge.request("wait", [input.sessionId, input.timeoutMs], input.timeoutMs + 2_000); }
   stack(input: { sessionId: string; stopId?: string | undefined; threadId: number; startFrame: number; maxFrames: number; packagePrefix?: string | undefined; includeInfrastructure: boolean }): Promise<object> { return this.bridge.request("stack", [input.sessionId, input.stopId, input.threadId, input.startFrame, input.maxFrames, input.packagePrefix, input.includeInfrastructure]); }

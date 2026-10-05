@@ -1,4 +1,5 @@
 import test from "node:test";
+import { withInputWarnings, type InputWarning } from "../../src/mcp/input-normalization.js";
 import assert from "node:assert/strict";
 import { inputs } from "../../src/mcp/schemas.js";
 import type { LspClient } from "../../src/jdtls/client.js";
@@ -20,10 +21,10 @@ const outline = [{ name: "A", kind: 5, range: { start: { line: 0, character: 0 }
   { name: "x", kind: 8, range: fieldRange, selectionRange: { start: { line: 1, character: 6 }, end: { line: 1, character: 7 } } },
   { name: "m()", kind: 6, range: methodRange, selectionRange: { start: { line: 2, character: 7 }, end: { line: 2, character: 8 } } },
 ] }];
-const paths = { resolve: () => "C:/workspace/src/A.java", fromUri: () => ({ path: snapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
+const paths = { relative: () => snapshot.path, resolve: () => "C:/workspace/src/A.java", fromUri: () => ({ path: snapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
 const sync = { indexGeneration: 1, verify: async () => snapshot, flush: async () => {}, snapshots: { get: () => snapshot, getByUri: () => snapshot, all: () => [snapshot] } } as unknown as WorkspaceSynchronizer;
 const config = { workspace: "/workspace", offline: true, trustWorkspace: false, maxHeap: "1g", resultMode: "structured", logLevel: "error", timeoutMs: 1000, resultBudget: 12_000 } as const;
-const testRequest = (path: string, compileProjectOnly: boolean): TestInput => ({ path, compile: "incremental", compileProjectOnly, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false });
+const testRequest = (path: string, compileProjectOnly: boolean): TestInput => ({ tests: [{ path }], compile: "incremental", compileProjectOnly, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false });
 
 test("additional test classpath entries resolve from the selected JDT project root", () => {
   const workspace = resolve("test/fixtures/unmanaged");
@@ -78,7 +79,7 @@ test("symbol search returns all matches and narrows to the nearest with a line h
 
 test("path navigation targets require a line in their input schema", () => {
   assert.equal(inputs.java_find_definition.safeParse({ queries: [{ target: { path: snapshot.path } }] }).success, false);
-  assert.equal(inputs.java_find_references.safeParse({ target: { path: snapshot.path } }).success, false);
+  assert.equal(inputs.java_find_references.safeParse({ queries: [{ target: { path: snapshot.path } }] }).success, false);
 });
 
 test("line-only navigation selects declarations instead of leading whitespace", async () => {
@@ -97,7 +98,10 @@ test("line-only navigation selects declarations instead of leading whitespace", 
     { line: 2, character: 7 }, { line: 2, character: 7 },
     { line: 3, character: 8 }, { line: 1, character: 8 },
   ]);
-  await assert.rejects(service.references({ ...request, target: { path: snapshot.path, line: 999 } }), { code: "INVALID_POSITION" });
+  const warnings: InputWarning[] = [];
+  await withInputWarnings(warnings, () => service.references({ ...request, target: { path: snapshot.path, line: 999, column: 999 } }));
+  assert.deepEqual(warnings.map(w => [w.requested, w.applied]), [[999, 6], [999, 2]]);
+  assert.deepEqual(positions.at(-1), { line: 5, character: 1 });
 });
 
 test("line-only navigation selects the innermost member on a single-line declaration", async () => {
@@ -293,7 +297,7 @@ test("runTests resolves a className-only selector via JDT symbols", async () => 
     isTestFile: async () => true, build: async () => 1, diagnostics: { all: () => [] }, testClasspaths: async () => ({}),
   } as unknown as LspClient;
   const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
-  const request: TestInput = { className: "com.example.SomethingTest", compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request: TestInput = { tests: [{ className: "com.example.SomethingTest" }], compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
   await assert.rejects(service.runTests(request), /no test runtime classpath/u);
 });
 
@@ -307,7 +311,7 @@ test("runTests rejects an ambiguous className-only selector with a path hint", a
     isTestFile: async () => true, build: async () => 1, diagnostics: { all: () => [] }, testClasspaths: async () => ({}),
   } as unknown as LspClient;
   const service = new JavaService({ ...config, trustWorkspace: true }, paths, sync, client);
-  const request: TestInput = { className: "com.example.SomethingTest", compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
+  const request: TestInput = { tests: [{ className: "com.example.SomethingTest" }], compile: "incremental", compileProjectOnly: false, vmArgs: [], systemProperties: {}, timeoutMs: 1000, includeOutput: false, includeStackTrace: false, limit: 50, includeTotal: false };
   await assert.rejects(service.runTests(request), /ambiguous|source position/ui);
 });
 
@@ -328,7 +332,7 @@ test("runTests compiles before the JDT test-source gate and explains a negative 
 test("unused-code analysis closes documents that it opened", async () => {
   let closes = 0;
   const client = { state: "ready", waitReady: async () => true, isDocumentOpen: () => false, extendedOutline: async () => outline, closeDocument: async () => { closes++; } } as unknown as LspClient;
-  const result = await new JavaService(config, paths, sync, client).unusedCode({ path: snapshot.path, kinds: ["method"], includeWriteOnly: true, timeoutMs: 1000, limit: 50, includeTotal: false }) as { complete: boolean };
+  const result = await new JavaService(config, paths, sync, client).unusedCode({ paths: [snapshot.path], kinds: ["method"], includeWriteOnly: true, timeoutMs: 1000, limit: 50, includeTotal: false }) as { complete: boolean };
   assert.equal(result.complete, true); assert.equal(closes, 1);
 });
 
@@ -380,4 +384,43 @@ test("test clean recovery preserves project-only scope and ignores unrelated syn
   const localPaths = { root: workspace, fromUri: () => ({ path: localSnapshot.path, origin: "workspace", editable: true }) } as unknown as WorkspacePaths;
   await assert.rejects(new JavaService({ ...config, workspace, trustWorkspace: true }, localPaths, localSync, client).runTests(testRequest(localSnapshot.path, true)), /no test runtime classpath/u);
   assert.deepEqual(calls, [{ roots: [testsUri], clean: false }, { roots: [testsUri], clean: true }]);
+});
+
+
+test("unused-code batches deduplicate files and paginate the combined candidates", async () => {
+  const realPaths = new RealWorkspacePaths(resolve("test/fixtures/unmanaged"));
+  const verified: string[] = []; let references = 0;
+  const localSync = { indexGeneration: 1, flush: async () => {}, verify: async (path: string) => { verified.push(path); return { ...snapshot, path, uri: pathToFileURL(realPaths.resolve(path)).href, content: content.replace("  void m()", "  private void m()") }; } } as unknown as WorkspaceSynchronizer;
+  const client = { state: "ready", waitReady: async () => true, isDocumentOpen: () => false, extendedOutline: async () => [{ ...outline[0]!, children: [{ ...outline[0]!.children[1]!, selectionRange: { start: { line: 2, character: 15 }, end: { line: 2, character: 16 } } }] }], references: async () => { references++; return []; }, closeDocument: async () => {} } as unknown as LspClient;
+  const service = new JavaService(config, realPaths, localSync, client);
+  const input = inputs.java_find_unused_code.parse({ paths: ["src/Overloads.java", "src/Organize.java", "src/./Overloads.java"], kinds: ["method"], limit: 1, includeTotal: true });
+  const first = await service.unusedCode(input) as { candidates: Array<{ path: string }>; total: number; nextCursor: string };
+  assert.ok(first.nextCursor);
+  const second = await service.unusedCode({ ...input, cursor: first.nextCursor }) as { candidates: Array<{ path: string }>; total: number };
+  assert.deepEqual(verified, ["src/Overloads.java", "src/Organize.java"]);
+  assert.equal(references, 2);
+  assert.equal(first.total, 2); assert.equal(second.total, 2);
+  assert.deepEqual([...first.candidates, ...second.candidates].map(item => item.path), ["src/Organize.java", "src/Overloads.java"]);
+});
+
+test("test batches prepare every source file and share one compilation", async () => {
+  const verified: string[] = []; const classified: string[] = []; const classpaths: string[] = []; let builds = 0;
+  const localSync = { ...sync, verify: async (path: string) => { verified.push(path); return { ...snapshot, path, uri: pathToFileURL(resolve("test/fixtures/unmanaged", path)).href }; } } as unknown as WorkspaceSynchronizer;
+  const client = { state: "ready", waitReady: async () => true, build: async () => { builds++; return 1; }, diagnostics: { all: () => [] }, isTestFile: async (uri: string) => { classified.push(uri); return true; }, testClasspaths: async (uri: string) => { classpaths.push(uri); return {}; } } as unknown as LspClient;
+  const service = new JavaService({ ...config, trustWorkspace: true }, paths, localSync, client);
+  const input = inputs.java_run_tests.parse({ tests: [{ path: "src/ATest.java" }, { path: "src/BTest.java", methodName: "works" }] });
+  await assert.rejects(service.runTests(input), /no test runtime classpath/u);
+  assert.deepEqual(verified, ["src/ATest.java", "src/BTest.java"]);
+  assert.equal(builds, 1); assert.equal(classified.length, 2); assert.equal(classpaths.length, 2);
+});
+
+
+test("source clipping cannot turn a valid range into a reversed range", async () => {
+  let observed: unknown;
+  const client = { state: "ready", waitReady: async () => true, diagnostics: { get: () => undefined }, codeActions: async (_uri: string, range: unknown) => { observed = range; return []; } } as unknown as LspClient;
+  const service = new JavaService(config, paths, sync, client);
+  const warnings: InputWarning[] = [];
+  await withInputWarnings(warnings, () => service.codeActions({ path: snapshot.path, range: { line: 100, column: 999, endLine: 200, endColumn: 1 }, diagnosticCodes: [], kinds: [], limit: 50, includeTotal: false }));
+  assert.deepEqual(observed, { start: { line: 5, character: 1 }, end: { line: 5, character: 1 } });
+  assert.ok(warnings.some(w => w.path.endsWith("endColumn") && w.applied === 2));
 });

@@ -25,7 +25,7 @@ function fixture(build: (clean: boolean, timeout: number, store: DiagnosticStore
   return { service: new JavaService(config, paths, sync, client), diagnostics, calls, client };
 }
 const compile = (kind: "incremental" | "clean" = "incremental") => inputs.java_compile.parse({ kind });
-const runTests = () => inputs.java_run_tests.parse({ path: snapshot.path });
+const runTests = () => inputs.java_run_tests.parse({ tests: [{ path: snapshot.path }] });
 
 test("syntax classification uses ECJ category codes including diagnostic data, never text", () => {
   assert.equal(isSyntaxError(syntax), true);

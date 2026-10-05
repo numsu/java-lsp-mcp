@@ -1,139 +1,155 @@
 # java-lsp-mcp
 
-Java semantic intelligence for Model Context Protocol (MCP) clients, powered by Eclipse JDT Language Server and ECJ.
+Give your coding agent a better understanding of Java code.
 
-`java-lsp-mcp` gives coding agents semantic navigation, diagnostics, compilation, tests, and refactoring previews. It never edits source files: changes are returned as hash-bound edits and optional diffs for the client to apply.
+`java-lsp-mcp` is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that connects AI coding tools to Eclipse's Java language tooling. It helps agents navigate a project, check changes, run tests, and investigate problems using the same understanding of Java that powers Eclipse.
 
-## Features
+It works with Maven, Gradle, Eclipse, modular Java, and unmanaged projects.
 
-- Workspace and dependency navigation
-- Maven, Gradle, Eclipse, modular, and unmanaged projects
-- Current-snapshot diagnostics and ECJ compilation
-- Parallel JUnit tests, suspended JDWP test launches, affected-test discovery, and JaCoCo coverage
-- Read-only fixes, refactorings, import, and formatting previews
-- Bounded, paginated agent-friendly results
+## What it can do
 
-## Prerequisites
+- **Explore code:** find symbols, definitions, references, callers, implementations, and type relationships.
+- **Check changes:** report compiler diagnostics and compile projects with Eclipse's Java compiler (ECJ).
+- **Run tests:** execute selected JUnit tests, collect coverage, and find tests that may be affected by a change. Tests compile automatically before running.
+- **Review improvements:** identify potentially unused private members and preview fixes, renames, formatting, and import changes.
+- **Debug Java:** set breakpoints, inspect threads and variables, step through execution, and replace supported code changes in a running JVM.
 
-- **Node.js 24+** — the server runs on your Node; release launchers use `node` from `PATH`.
-- **A JDK** — pointed to by `JAVA_HOME` or `--tooling-jdk`. It runs JDT LS and your tests.
-- **A Java workspace** — Maven, Gradle, Eclipse, modular, or unmanaged.
+Source changes are returned as previews for your coding tool to apply. The server does not edit your source files itself. Compilation and tests can produce build output and execute project code.
 
-Release archives bundle JDT LS, JUnit, and JaCoCo. Everything else comes from the prerequisites above.
+## Getting started
 
-## Installation
+### 1. Install the prerequisites
 
-Download the archive for your platform from the [releases page](https://github.com/numsu/java-lsp-mcp/releases), unpack it, and run:
+You'll need:
+
+- **Node.js 24 or later**, available on your `PATH`.
+- **A JDK**, with `JAVA_HOME` pointing to its installation directory. You can also select it with `--tooling-jdk`.
+- **A Java project** and an MCP-compatible coding client.
+
+### 2. Download a release
+
+Download the archive for your operating system from [GitHub Releases](https://github.com/numsu/java-lsp-mcp/releases) and extract it. Releases include the Java language server, test runner, and coverage tooling; Node.js and the JDK are installed separately.
+
+From the extracted directory, check your setup:
 
 ```sh
-java-lsp-mcp/bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
+./bin/java-lsp-mcp doctor --workspace /absolute/path/to/project
 ```
 
-On Windows use `bin\java-lsp-mcp.cmd`. Then verify with `java-lsp-mcp doctor --workspace /project`.
+On Windows, use the Windows launcher:
 
-To use it in VS Code, add the launcher to `.vscode/mcp.json` in your project:
+```powershell
+.\bin\java-lsp-mcp.cmd doctor --workspace C:\dev\my-project
+```
+
+### 3. Connect your coding client
+
+For VS Code, create `.vscode/mcp.json` in your Java project:
 
 ```json
 {
   "servers": {
     "java-lsp-mcp": {
       "command": "/absolute/path/to/java-lsp-mcp/bin/java-lsp-mcp",
-      "args": ["serve", "--workspace", "/absolute/path/to/project", "--trust-workspace"]
+      "args": [
+        "serve",
+        "--workspace", "/absolute/path/to/project",
+        "--trust-workspace"
+      ]
     }
   }
 }
 ```
 
-`java-lsp-mcp print-config generic --workspace /project --trust-workspace` prints the equivalent snippet for other clients.
+Replace both paths with your own absolute paths. On Windows, set `command` to the extracted `bin/java-lsp-mcp.cmd` launcher; forward slashes work in the JSON paths.
+
+For other clients, add a local MCP server using the same command and arguments. From the extracted directory, you can print those settings with:
+
+```sh
+./bin/java-lsp-mcp print-config generic --workspace /absolute/path/to/project --trust-workspace
+```
+
+Your client starts the server and communicates with it over standard input and output. You can also launch it manually with the same arguments:
+
+```sh
+./bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
+```
+
+Use `--trust-workspace` only for projects you trust: importing Maven or Gradle projects, compiling, and running tests can execute project-controlled code. Without this flag, build import is disabled. See [SECURITY.md](SECURITY.md) for more information.
+
+## Using it
+
+Once connected, ask your agent to do things like:
+
+- "Find the callers of this method and explain how the request flows through them."
+- "Check this change for compiler errors and run the relevant tests."
+- "Show me a preview of renaming this class and updating its references."
+- "Find private members that might be unused."
+- "Debug this failing test and inspect the values at the breakpoint."
+
+The first project import may take a little time. `java_status` reports readiness and startup problems.
+
+Related lookups can be batched in one request, and tests and unused-code analysis can cover multiple files. Numeric limits clamp to supported values and oversized batches are capped, with warnings in the response. For client developers, print the shared agent guidance and detailed tool inputs with:
+
+```sh
+./bin/java-lsp-mcp describe-tools
+```
+
+Compilation and selected tests are useful for quick feedback. Keep using your project's Maven or Gradle commands when you need its full build lifecycle, code generation, packaging, or integration-test setup. Affected-test and unused-code results are candidates for review.
 
 ## Configuration
 
-Flags for `serve` (a `java-lsp-mcp.json` or `java-lsp-mcp.toml` file in the workspace and `JAVA_LSP_MCP_*` environment variables work too; flags win, then env, then the file):
+Most projects only need `--workspace` and `--trust-workspace`. These options cover common setups:
 
-| Flag | What it does |
-|---|---|
-| `--workspace` | The project to work on (absolute path, required). |
-| `--trust-workspace` | Allow Maven/Gradle import, compilation, and test execution. Without it the server only reads code — review the project first. |
-| `--tooling-jdk` | JDK that runs JDT LS (defaults to `JAVA_HOME`). |
-| `--project-jdk` | JDK that runs your tests (defaults to the tooling JDK). |
-| `--offline` | Never touch the network; Maven/Gradle resolve from caches only. |
-| `--exclude-project` | Leave a module out of import, compilation, and tests (repeatable). |
-| `--test-classpath-entry` | Extra directory or jar on the test runtime classpath (repeatable). |
-| `--source-encoding` | Override Eclipse resource settings and automatic UTF-8/Windows-1252 source decoding. |
-| `--timeout`, `--result-budget` | Shared operation timeout in ms and per-result output budget in bytes. |
-| `--log-level`, `--max-heap`, `--result-mode` | Operational tuning; all logs go to stderr, never stdout. |
+| Option | When to use it |
+| --- | --- |
+| `--tooling-jdk /path/to/jdk` | Choose the JDK for the language server instead of `JAVA_HOME`. |
+| `--project-jdk /path/to/jdk` | Use a different JDK to run your tests. |
+| `--offline` | Use cached dependencies without network access. |
+| `--exclude-project module-name` | Leave a module out of import, compilation, and tests. Repeat for additional modules. |
+| `--source-encoding encoding` | Specify an encoding for legacy source files. Otherwise, Eclipse settings and automatic UTF-8/Windows-1252 detection apply. |
+| `--test-classpath-entry /path/to/resources` | Add resources or a JAR needed by your tests. Repeat for additional entries. |
 
-Source reads honor `--source-encoding` first, then Eclipse resource encoding settings. Without either, valid UTF-8 is preserved and other source files are read as Windows-1252, with a `SOURCE_ENCODING_FALLBACK` warning on stderr. Source files are never converted or modified. Set the encoding explicitly for other legacy encodings; invalid or unsupported explicit encodings still report errors.
+You can also keep settings in `java-lsp-mcp.json` or `java-lsp-mcp.toml` in the workspace, or use `JAVA_LSP_MCP_*` environment variables. Command-line options take precedence over environment variables, which take precedence over the configuration file.
 
-Other commands: `doctor` checks the setup, `version` prints versions, `describe-tools` prints the complete machine-readable tool schemas, `print-config` generates client configuration, and `clear-cache` wipes the workspace index.
+Run `./bin/java-lsp-mcp help` for the full command list and options.
 
-If Eclipse cannot restore cached workspace metadata because a generated resource disappeared, the server detects the failed recovery, rebuilds its JDT cache once, and retries startup.
+## Troubleshooting
 
-## Tools
+Start with `doctor` to check the workspace, Node.js, JDK, and bundled language server. If your client cannot start the server, check its launcher path and whether Node.js is available to that client.
 
-Source-based tools support the encoding fallback above. Symbol targets accept either `qualifiedName` or `path` plus a required one-based `line`. Omit `column` to select the innermost declaration enclosing that line; supply a one-based Unicode code-point `column` for an exact position. Columns beyond the line are clamped to its end.
+If dependencies or test sources are missing, check that the project is trusted and that its Maven or Gradle setup works locally. After changing a build file, ask the agent to refresh project configuration with `java_update_projects`.
 
-| Tool | Purpose |
-|---|---|
-| `java_status` | Readiness and runtime status |
-| `java_outline` | Source declarations |
-| `java_search_symbols` | Batch workspace/dependency symbols with cached pagination; omit `line` for every match, pass `line` to keep only the nearest declaration |
-| `java_find_definition` | Batch symbol declarations; target by qualified name or file path + source line |
-| `java_find_references` | Semantic usages with cached pagination; target by qualified name or file path + source line |
-| `java_call_hierarchy` | Callers and callees; incoming callers default to production scope |
-| `java_type_hierarchy` | Supertypes, subtypes, implementations |
-| `java_diagnostics` | Current-snapshot diagnostics; fails fast with `JDT_BUSY` when JDT is busy and diagnostics are stale |
-| `java_compile` | ECJ compilation with diagnostics, prerequisite recovery, and one clean retry when no syntax errors are confirmed |
-| `java_update_projects` | Maven/Gradle configuration re-sync into JDT (`force` for full reimport) |
-| `java_run_tests` | JUnit execution after automatic incremental compilation/recovery; persistent compile failures include diagnostics; `debug: true` launches suspended JDWP |
-| `java_find_affected_tests` | Statically connected tests |
-| `java_find_unused_code` | Candidate unused private members |
-| `java_code_actions` | Available fixes and refactorings |
-| `java_edit_preview` | Rename, action, import, format previews |
-| `java_debug_targets` | Discover local JVMs started with the JDWP agent |
-| `java_debug_attach`, `java_debug_sessions`, `java_debug_detach` | JDWP debug-session lifecycle |
-| `java_debug_set_breakpoints`, `java_debug_wait_for_stop` | Replace source breakpoints (slash/backslash paths identify the same file) and bounded stop-event waits |
-| `java_debug_threads`, `java_debug_stack_trace`, `java_debug_variables` | Filtered runtime thread/stack, local, collection, and object inspection |
-| `java_debug_execute` | Continue and step over, into, or out |
-| `java_debug_hot_swap` | ECJ/JDI Hot Code Replace with change and active-frame reporting |
+If the project index appears stale, stop the server, clear the workspace cache, and restart it:
 
-`java_search_symbols` and `java_find_definition` require a `queries` array of 1–20 parameter objects. Batch related lookups to gather context in one call. Each entry has its own options, defaults, limit, and cursor. The response contains `results` in input order; failed entries contain `error` with `code`, `message`, and optional `details`, while other entries still complete. Top-level single-query parameters are rejected.
-
-```json
-{"queries":[{"query":"OrderService"},{"query":"Customer","scope":"all"}]}
+```sh
+./bin/java-lsp-mcp clear-cache --workspace /absolute/path/to/project --trust-workspace
 ```
 
-```json
-{"queries":[{"target":{"qualifiedName":"com.example.OrderService"},"expand":["body"]},{"target":{"path":"src/Customer.java","line":12}}]}
-```
-
-Symbol search and reference lookups retain independent result snapshots when another page is available. Subsequent pages reuse the collected matches and reference usage classification; a fresh request without a cursor performs a new lookup. The shared cache expires entries **two minutes after creation** and uses LRU eviction with limits of **32 result sets and 16 MiB of serialized results**. Access does not extend expiry. Workspace changes and JDT reconnects invalidate cached continuations. An expired or evicted snapshot returns `STALE_RESULT_SET`; restart without a cursor. Results exceeding the cache byte limit bypass caching and retain ordinary pagination.
-
-Source verification reads, decodes, and hashes each Java file once per verification, reusing the synchronized snapshot. Unchanged verification still offers the document to JDT (including retrying a failed initial synchronization) and avoids unnecessary watched-file change notifications.
-
-Compilation retries an unsuccessful incremental build once as a clean build when current diagnostics contain no confirmed JDT syntax-error codes. Syntax errors are checked before severity filtering or pagination. Both attempts share the compilation timeout and preserve project exclusions and `compileProjectOnly` scope, including loaded prerequisites. Explicit clean builds, cancellation, unknown statuses, and request/configuration failures do not trigger a retry. `java_compile.buildAttempts` records the attempted build kinds and statuses; its diagnostics describe the final result.
-
-`java_run_tests` compiles incrementally by default and uses the same recovery policy before launching tests. Successful builds are reused until the workspace generation changes; `compile: "none"` still skips compilation and `compile: "clean"` requests a clean build directly. Normal test results include `buildAttempts` (empty when a build was reused). Persistent build failures return `status: "compile-failed"` and a `compilation` object with build status, attempts, diagnostic counts, locations/messages, total, and `diagnosticsTruncated` for the bounded diagnostic sample. Test counts and test failures remain separate from compiler diagnostics. Debug launches use the same build policy; failed builds return compiler details in the tool error.
-
-Run `java-lsp-mcp describe-tools` for the complete machine-readable tool schemas.
+Use the same workspace and configuration options as your server. Diagnostic logs go to standard error and are usually available in your client's MCP output panel.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports, documentation improvements, and pull requests are welcome. For bug reports, include your operating system, Node.js and JDK versions, client, and a small reproduction where possible. Remove secrets and private source from logs before sharing them.
 
-Build from source with:
+To work on the server, clone this repository, set `JAVA_HOME`, and run:
 
 ```sh
 npm ci
 npm run fetch-runtime
 npm run check
-bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trust-workspace
 ```
 
-## Security
+Start your local build against a Java project with:
 
-Review [SECURITY.md](SECURITY.md) before granting workspace trust. Report vulnerabilities privately.
+```sh
+node bin/java-lsp-mcp.js serve --workspace /absolute/path/to/project --trust-workspace
+```
+
+`npm run check` builds the server and runs unit and protocol tests. Run `npm run test:integration` for runtime integration tests; these require the JDK and downloaded runtime components.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and release checks. Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[MIT](LICENSE).

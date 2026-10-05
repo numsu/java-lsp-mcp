@@ -1,3 +1,4 @@
+import { clampSourceValue } from "./input-normalization.js";
 import { randomUUID } from "node:crypto";
 import { TemporaryResultCache } from "../results/temporary-cache.js";
 import { existsSync, statSync } from "node:fs";
@@ -12,7 +13,7 @@ import { outlineNeedsReconcile } from "../jdtls/outline.js";
 import { budgetItems, compact, truncateUtf8 } from "../results/budget.js";
 import { publicEdit, sha256, unifiedDiff, validateAndSortEdits } from "../results/edits.js";
 import { CursorSigner, fingerprint } from "../results/pagination.js";
-import { codePointToUtf16Column, lines, publicLocation } from "../results/positions.js";
+import { codePointToUtf16Column, utf16ToCodePointColumn, lines, publicLocation } from "../results/positions.js";
 import { resolveCoverageRuntime, resolveTestRuntime } from "../runtime/resolver.js";
 import { createCoverageReport, type CoverageReport } from "../testing/coverage.js";
 import { runJUnit, type JunitRunOptions, type JunitRunResult } from "../testing/junit.js";
@@ -31,12 +32,12 @@ const kinds = ["", "file", "module", "namespace", "package", "class", "method", 
 const severities = ["", "error", "warning", "info", "hint"] as const;
 export interface TestSelectorInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined }
 interface CoverageInput { enabled: boolean; includes: string[]; details: "summary" | "files"; limit: number; includeTotal: boolean; cursor?: string | undefined }
-export interface TestInput { path?: string | undefined; className?: string | undefined; methodName?: string | undefined; tests?: TestSelectorInput[] | undefined; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; debug?: boolean | undefined; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
+export interface TestInput { tests: TestSelectorInput[]; compile: "incremental" | "clean" | "none"; compileProjectOnly: boolean; workingDirectory?: string | undefined; vmArgs: string[]; systemProperties: Record<string, string>; timeoutMs: number; includeOutput: boolean; includeStackTrace: boolean; debug?: boolean | undefined; coverage?: CoverageInput | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface CachedTestRun extends JunitRunResult { coverage?: CoverageReport; buildAttempts?: BuildAttempt[] }
 interface PreparedTest { selector: TestSelectorInput; snapshot: Snapshot }
 interface TestLaunchGroup { cwd: string; classpaths: string[]; selectors: Array<{ className: string; methodName?: string | undefined; sourcePath: string }> }
 interface AffectedTestsInput { target: SymbolTarget; transitive: boolean; maxDepth: number; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
-interface UnusedCodeInput { path?: string | undefined; kinds: ("method" | "constructor" | "field")[]; includeWriteOnly: boolean; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
+interface UnusedCodeInput { paths?: string[] | undefined; kinds: ("method" | "constructor" | "field")[]; includeWriteOnly: boolean; timeoutMs: number; limit: number; includeTotal: boolean; cursor?: string | undefined }
 interface AnalysisResult { items: object[]; complete: boolean; message?: string | undefined }
 type BuildStatus = "failed" | "succeeded" | "with-errors" | "cancelled" | "unknown";
 interface BuildAttempt { kind: "incremental" | "clean"; buildStatus: BuildStatus }
@@ -78,7 +79,7 @@ export class JavaService {
   }
   async outline(input: { path: string; depth: number; visibility: ("public" | "protected" | "package" | "private")[]; kinds: string[]; format: "compact"; containingLine?: number | undefined; limit: number; includeTotal: boolean; cursor?: string | undefined; namePattern?: string | undefined }): Promise<object> {
     const snap = await this.prepareFile(input.path);
-    if (input.containingLine !== undefined && input.containingLine > lines(snap.content).length) throw new JavaLspMcpError("INVALID_POSITION", "containingLine is outside the file");
+    if (input.containingLine !== undefined) input = { ...input, containingLine: clampSourceValue(`${snap.path}.containingLine`, input.containingLine, 1, lines(snap.content).length) };
     const raw = await this.documentOutline(snap, this.config.timeoutMs);
     const pattern = compileNamePattern(input.namePattern);
     const values: object[] = [];
@@ -379,7 +380,7 @@ export class JavaService {
   private async prepareTestSelectors(input: TestInput, signal: AbortSignal | undefined): Promise<PreparedTest[]> {
     if (!this.config.trustWorkspace) throw new JavaLspMcpError("UNTRUSTED_WORKSPACE", "Running tests executes workspace code", { hint: "Review the project, then restart java-lsp-mcp with --trust-workspace" });
     if (signal?.aborted) throw signal.reason ?? new Error("Request cancelled");
-    const requested: TestSelectorInput[] = input.tests ?? [{ ...(input.path && { path: input.path }), ...(input.className && { className: input.className }), ...(input.methodName && { methodName: input.methodName }) }];
+    const requested = input.tests;
     const resolved = await Promise.all(requested.map(async selector => {
       if (selector.path) return selector;
       if (!selector.className) throw new JavaLspMcpError("INVALID_TEST_SELECTOR", "Test selector requires path or className");
@@ -466,7 +467,7 @@ export class JavaService {
   }
   private async calculateUnusedCode(input: UnusedCodeInput, signal?: AbortSignal): Promise<AnalysisResult> {
     const deadline = Date.now() + input.timeoutMs;
-    const files = input.path ? [input.path] : await workspaceJavaFiles(this.paths.root);
+    const files = input.paths ? [...new Set(input.paths.map(path => this.paths.relative(this.paths.resolve(path))))] : await workspaceJavaFiles(this.paths.root);
     const candidates: object[] = []; let complete = true;
     for (const path of files) {
       if (expired(deadline, signal)) { complete = false; break; }
@@ -861,13 +862,22 @@ export function resolveTestClasspathEntries(entries: string[], projectRootUri: s
 function compileNamePattern(pattern: string | undefined): RegExp | undefined { if (!pattern) return undefined; if (/\\[1-9]|\(\?<?[=!]|\([^)]*[*+]\)[*+{]/u.test(pattern)) throw new JavaLspMcpError("INVALID_PATTERN", "namePattern uses an unsafe regular-expression construct"); try { return new RegExp(pattern, "u"); } catch (error) { throw new JavaLspMcpError("INVALID_PATTERN", error instanceof Error ? error.message : String(error)); } }
 function declarationVisibility(snapshot: Snapshot, symbol: DocumentSymbol): "public" | "protected" | "package" | "private" { const source = lines(snapshot.content); const fragments = source.slice(symbol.range.start.line, symbol.selectionRange.start.line + 1); if (fragments.length) fragments[fragments.length - 1] = fragments.at(-1)!.slice(0, symbol.selectionRange.start.character); const declaration = fragments.join("\n").replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/gu, " "); const matches = [...declaration.matchAll(/\b(public|protected|private)\b/gu)]; return (matches.at(-1)?.[1] as "public" | "protected" | "private" | undefined) ?? "package"; }
 function toLspPosition(snapshot: Snapshot, position: { line: number; column?: number | undefined }): LspPosition {
-  const line = lines(snapshot.content)[position.line - 1];
-  if (line === undefined) throw new JavaLspMcpError("INVALID_POSITION", `Line ${position.line} is outside ${snapshot.path}`);
-  try { return { line: position.line - 1, character: codePointToUtf16Column(line, position.column ?? 1) }; }
+  const source = lines(snapshot.content);
+  const publicLine = clampSourceValue(`${snapshot.path}.line`, position.line, 1, source.length);
+  const line = source[publicLine - 1]!;
+  const column = clampSourceValue(`${snapshot.path}.column`, position.column ?? 1, 1, Array.from(line).length + 1);
+  try { return { line: publicLine - 1, character: codePointToUtf16Column(line, column) }; }
   catch (error) { throw new JavaLspMcpError("INVALID_POSITION", error instanceof Error ? error.message : String(error)); }
 }
 function toLspRange(snapshot: Snapshot, range: { line: number; column: number; endLine: number; endColumn: number }): LspRange {
-  return { start: toLspPosition(snapshot, range), end: toLspPosition(snapshot, { line: range.endLine, column: range.endColumn }) };
+  const start = toLspPosition(snapshot, range);
+  let end = toLspPosition(snapshot, { line: range.endLine, column: range.endColumn });
+  if (end.line < start.line || end.line === start.line && end.character < start.character) {
+    const source = lines(snapshot.content);
+    clampSourceValue(`${snapshot.path}.endColumn`, utf16ToCodePointColumn(source[end.line]!, end.character), utf16ToCodePointColumn(source[start.line]!, start.character), utf16ToCodePointColumn(source[start.line]!, start.character));
+    end = { ...start };
+  }
+  return { start, end };
 }
 const buildDescriptors = ["pom.xml", "build.gradle", "build.gradle.kts"] as const;
 function unimportedProjectHint(error: unknown): string {

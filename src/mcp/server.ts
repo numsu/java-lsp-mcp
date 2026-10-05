@@ -6,42 +6,43 @@ import { JavaLspMcpError } from "../types.js";
 import type { JavaService } from "./service.js";
 import { DebugService } from "../debug/service.js";
 import { inputs, outputs, type ToolName } from "./schemas.js";
+import { normalizeInput, withInputWarnings } from "./input-normalization.js";
 import { application } from "../version.js";
 
-const batchDescription = "Batch related lookups in queries (1–20 objects). Ordered results have independent options/pagination or per-entry errors. ";
-const sourceDecodingDescription = "Unconfigured source reads use UTF-8, falling back to Windows-1252 with a stderr warning for invalid UTF-8; Eclipse resource settings and --source-encoding take precedence.";
 export const descriptions: Record<ToolName, string> = {
-  java_status: "Probe JDT readiness. ready=true means semantic requests are accepted; state=busy and activity describe current background work without revoking readiness. Before the first Java semantic request, call with waitForReady=true instead of using a fixed startup delay.",
-  java_outline: `Return a filtered, paginated compact Java outline with declaration start/end lines and no method bodies. Set containingLine to return only its enclosing declaration chain. ${sourceDecodingDescription}`,
-  java_search_symbols: `${batchDescription}Search workspace/dependency symbols and cached enum constants. line keeps the nearest declaration before pagination (ties keep the first match); omit for all matches. includeImplementation=true adds up to 200 source lines and the declaration range for one workspace match. Decoding failures return warnings. Pages cache for 2 minutes; STALE_RESULT_SET means restart without cursor. Source uses UTF-8/Windows-1252 fallback with stderr warnings; Eclipse settings and --source-encoding override. Use text search for non-symbol text.`,
-  java_find_definition: `${batchDescription}Resolve semantic declarations and their full line ranges. Context, body, direct members, and documentation are opt-in. Target by qualified name or file path + required source line. Omit column to select the innermost declaration enclosing that line; pass column to target an exact source position, clamped to the line length. Qualified targets still return the semantic location when configured source decoding fails; source-derived expansion is then omitted. ${sourceDecodingDescription}`,
-  java_find_references: `Find semantic usages with call/read/write filters, enclosing declarations, containing-symbol scope, and source snippets. Target by qualifiedName or path + line; omit column for the enclosing declaration, or pass a one-based Unicode column for an exact position (clamped to line length). Pages cache for 2 minutes; STALE_RESULT_SET means restart without cursor. Source uses UTF-8/Windows-1252 fallback with stderr warnings; Eclipse settings and --source-encoding override. Use text search for comments, strings, configuration, and reflection names.`,
-  java_call_hierarchy: "Find incoming callers or outgoing callees of a method or constructor as a bounded semantic graph. Incoming hierarchies exclude test callers by default; set callerScope=tests for test callers only or callerScope=all for both.",
-  java_type_hierarchy: "Find semantic supertypes, subtypes, implementations, interfaces, and permitted subclasses.",
-  java_diagnostics: "Return JDT/ECJ diagnostics for the exact synchronized content. All requested paths share one deadline; status=partial identifies paths whose current-version diagnostics were not published in time. Fails fast with JDT_BUSY instead of waiting the full timeout when JDT is starting, importing, building, indexing, or busy and current-version diagnostics are stale; the error details carry state, activity, and pendingPaths. Then call java_status with waitForReady=true and retry the pending paths; if pom.xml/build.gradle changed, call java_update_projects then java_compile. Use immediately after applying external patches.",
-  java_compile: "Build the workspace with ECJ and return paginated diagnostics plus buildAttempts. Incremental failures retry clean once unless current diagnostics confirm syntax errors; both attempts share the timeout. Cancellation, unknown statuses, and request/configuration failures do not retry. Loaded prerequisites recover automatically. Build status is authoritative; diagnosticsComplete reports available error details. Use for final Java verification.",
-  java_update_projects: "Re-read Maven (pom.xml) or Gradle (build.gradle/.kts) configuration into JDT without restarting, for dependency, source-root, or compiler-level changes. Updates the given workspace paths' projects; omit paths, pass all:true, or include \"*\" to update every non-excluded build descriptor found in the workspace. force=true runs a full workspace reimport instead, which also discovers added or removed modules but is slower. Requires --trust-workspace and may download dependencies. Call java_compile afterwards to rebuild.",
-  java_run_tests: "Run path/className/methodName or batch up to 100 selectors in tests; className may omit path (ambiguous names require path). Compile incrementally by default, reusing successful builds; failures retry clean once unless current diagnostics confirm syntax errors, within the compilation timeout. Persistent failures include compilation diagnostics (total/diagnosticsTruncated); buildAttempts is empty for reused builds. Cancellation, unknown statuses, and request/configuration failures do not retry. Batch/concurrent runs share compilation and execute in parallel; avoid tests needing exclusive resources. compileProjectOnly limits builds to selected projects and loaded prerequisites. debug=true launches suspended JDWP JVMs: set breakpoints, then java_debug_execute with action=continue and no stopId. coverage={} enables JaCoCo; coverage.details=summary omits files, otherwise coverage.limit/cursor paginates them. Use Maven/Gradle for lifecycle plugins or integration setup.",
-  java_find_affected_tests: "Find JUnit/TestNG test methods that can statically reach a target through JDT call relationships. This selects fast candidate tests; it does not prove runtime coverage.",
-  java_find_unused_code: "Find private methods, constructors, and fields with no semantic references, plus optionally write-only fields. Results are candidates because reflection and frameworks may access members implicitly.",
-  java_code_actions: "List JDT quick fixes/refactorings and mint short-lived handles. Does not apply changes.",
-  java_edit_preview: "Calculate rename, code-action, import, or formatting edits without modifying files. Apply the preview with the normal patch tool.",
-  java_debug_targets: "Discover local Java processes that were started with the JDWP agent. This is read-only and does not attach; call java_debug_attach with a selected targetId.",
-  java_debug_attach: "Attach a JDI debug session to one selected local JDWP target. A target normally accepts only one debugger, so detach Eclipse or another debugger first. Re-attaching right after java_debug_detach is safe: the attach briefly retries while the target re-arms its JDWP listener instead of failing with a transport-endpoint error.",
-  java_debug_sessions: "List debug sessions owned by this MCP server and their running, stopped, terminated, or disconnected state.",
-  java_debug_set_breakpoints: "Idempotently replace all source-line breakpoints for one workspace-relative Java source file. Slash and backslash path variants identify the same file, including when clearing breakpoints. Requires an active sessionId from java_debug_attach or a debug test launch. Unloaded classes remain pending until class preparation.",
-  java_debug_threads: "List target JVM threads and the current location of suspended threads. Requires an active sessionId from java_debug_attach or a debug test launch. System/infrastructure threads are omitted by default; packagePrefix matches the suspended thread's declaring class and namePattern is a full-match Java regular expression (an invalid pattern returns INVALID_PATTERN).",
-  java_debug_wait_for_stop: "Wait for a breakpoint or step event with a bounded timeout. Requires an active sessionId from java_debug_attach or a debug test launch. A timeout is a normal outcome. Use the returned stopId for stack and variable inspection.",
-  java_debug_stack_trace: "Read a paginated stack trace for the thread suspended at the current stop. Requires an active sessionId from java_debug_attach or a debug test launch. Omit stopId to use the current stop. Application frames are returned by default; use packagePrefix or includeInfrastructure to control filtering. Frame handles become stale as soon as execution resumes.",
-  java_debug_variables: "Read arguments, locals, this, or lazily expand an object/array value. Requires an active sessionId from java_debug_attach or a debug test launch. Omit stopId to use the current stop. inlineFields shows important object fields; includeGetters is an explicit opt-in. Handles are scoped to stopId and become stale on resume.",
-  java_debug_execute: "Continue the target or step over, into, or out on the stopped thread. Requires an active sessionId from java_debug_attach or a debug test launch. A second request while a step/continue is active fails with a pending-request error; the response reports the active request. Step actions require threadId and default to the current stop; pass stopId to detect a changed stop (STALE_STOP); waitTimeoutMs can atomically await the next stop.",
-  java_debug_detach: "Detach this MCP debug session without terminating the target JVM. Any event-set suspension owned by the session is resumed first.",
-  java_debug_hot_swap: "Compile selected workspace Java sources with ECJ and redefine their loaded classes through JDI Hot Code Replace. Requires an active sessionId from java_debug_attach or a debug test launch. Standard JVMs generally support method-body changes only; breakpoints are restored after replacement.",
+  java_status: "Check readiness, startup failures, and background activity. waitForReady=true waits for semantic readiness; busy activity may coexist with ready=true.",
+  java_outline: "List declarations in one file, with line ranges and nested members. containingLine selects its enclosing declaration chain. Filters and depth control the outline; method bodies are omitted.",
+  java_search_symbols: "Batch symbol searches in queries. scope defaults to workspace; all includes dependencies. line keeps the nearest declaration before pagination; omit for all matches. includeImplementation adds up to 200 source lines only when one workspace match remains. Use text search for non-symbol text.",
+  java_find_definition: "Batch declaration lookups in queries. expand enables context, body, or direct members; includeDocumentation adds documentation. Dependency symbols require a workspace source position that references them. If source decoding fails, qualified workspace targets can still return locations without source expansions.",
+  java_find_references: "Batch semantic usages in queries. Declarations are excluded and scope is workspace by default. usageKinds filters calls/reads/writes; within limits usages to an enclosing declaration. includeEnclosing adds owners, includeText adds the usage line, and contextLines>0 adds snippets.",
+  java_call_hierarchy: "Batch method/constructor call graphs in queries; direction is required. Incoming callerScope defaults to production; tests selects tests only, all includes both. callerScope is ignored for outgoing graphs. depth and limitPerNode bound traversal.",
+  java_type_hierarchy: "Batch type graphs in queries: supertypes, subtypes, implementations, and interfaces. direction defaults to both; depth bounds traversal. Returns root, nodes, and edges per query.",
+  java_diagnostics: "Read compiler diagnostics without building. scope=path requires path; paths requires paths; workspace accepts neither. Current-version checks are on by default. waitForCurrentVersion=false allows cached diagnostics. JDT_BUSY or status=partial reports pendingPaths; inspect java_status before retrying. Refresh changed build files with java_update_projects first.",
+  java_compile: "Compile with ECJ; kind defaults to incremental. Failed incremental builds retry clean once unless current diagnostics confirm syntax errors. Returns final build status, diagnostics, and buildAttempts; diagnosticsComplete indicates whether diagnostic reporting settled. A cursor pages the saved build without recompiling.",
+  java_run_tests: "Batch independent JUnit selectors in tests; each needs path or className, optionally methodName. Ambiguous class names require path. Requires workspace trust. Compiles incrementally by default with clean recovery, reusing successful builds; compile=none skips it. Persistent failures include compilation diagnostics. Runs may execute in parallel: avoid tests requiring exclusive resources. compileProjectOnly selects projects and loaded prerequisites. coverage={} enables coverage; details=summary omits file pages. Cursors page the saved run. debug=true starts attached, suspended sessions; set breakpoints then continue without stopId. Debug excludes coverage and custom JDWP vmArgs.",
+  java_update_projects: "Refresh Maven/Gradle configuration after build-file or dependency changes. Requires workspace trust. Pass paths, or all=true without paths; omitted paths or paths containing '*' selects all eligible projects. force=true reimports the whole workspace, ignoring selectors. May download dependencies. Compile afterwards.",
+  java_find_affected_tests: "Batch candidate affected-test searches in queries. Traverses incoming calls to JUnit/TestNG tests; transitive defaults to true. complete=false means traversal was cut short. Static candidates do not prove coverage; use them to select tests for java_run_tests.",
+  java_find_unused_code: "Analyze source files in paths, or omit paths for the workspace. Finds private methods/constructors/fields with no semantic usages; includeWriteOnly also finds write-only fields. Files share timeout and pagination. complete=false means partial analysis; reflection/framework access makes candidates unsuitable for automatic deletion.",
+  java_code_actions: "Batch fixes/refactorings for path+range entries in queries; kinds defaults to quickfix; use refactor or source.* kinds for other actions. Returns action IDs for java_edit_preview(operation=codeAction). IDs expire or become stale after workspace changes; request actions again on STALE_ACTION.",
+  java_edit_preview: "Preview edits: rename requires target+newName; codeAction requires an ID from java_code_actions; organizeImports/format require path, with optional range for format. includeDiff adds a diff. Check returned baseHash before applying edits with a file-editing tool. Command-based actions cannot be previewed.",
+  java_debug_targets: "Discover local JVMs with JDWP enabled; pass a returned attachable targetId to java_debug_attach. query filters targets; includeUnavailable also shows targets that cannot be attached.",
+  java_debug_attach: "Attach to a targetId from java_debug_targets and return a sessionId. A JVM normally accepts one debugger: detach another debugger first. Brief retries handle reattachment after java_debug_detach.",
+  java_debug_sessions: "List this server's sessions, states, stopId, stoppedThreads, and activeRequest. Use to recover session/stop handles; external debuggers' sessions are excluded.",
+  java_debug_set_breakpoints: "Replace all breakpoints for sessionId+sourcePath. breakpoints=[] clears that file's breakpoints. Lines clamp to source bounds; unloaded classes remain pending until loaded.",
+  java_debug_threads: "List JVM threads and suspended locations. System threads are hidden by default. namePattern is a full-match Java regex; packagePrefix filters available declaring-class names. Use threadId from a stop event for stack inspection and stepping.",
+  java_debug_wait_for_stop: "Wait for a breakpoint, step, or terminal event. Timeout is a normal outcome; wait again while execution is pending. A stopped response supplies stopId and threadId for inspection.",
+  java_debug_stack_trace: "Inspect the current stopped threadId from a stop event. Omit stopId for the current stop. Infrastructure frames are hidden by default. startFrame is zero-based; use nextStartFrame for the next page. Returned frameIds feed java_debug_variables.",
+  java_debug_variables: "Inspect exactly one frameId or valueId at the current stop; omit stopId to use it. frameId comes from java_debug_stack_trace; valueId expands an object/array from this tool. start is zero-based; use nextStart to paginate. inlineFields expands fields; includeGetters invokes target code. Handles expire on execution.",
+  java_debug_execute: "Continue or step the current stop. Steps require the stopped event's threadId. Omit stopId for the current stop; startup-suspended test sessions use continue without stopId. waitTimeoutMs optionally waits for the next event. If execution is pending, use java_debug_wait_for_stop instead of issuing another action.",
+  java_debug_detach: "Detach sessionId, release debugger-owned suspensions, and leave the JVM running.",
+  java_debug_hot_swap: "Compile sourcePaths and replace their loaded classes in sessionId. dryRun still compiles but skips replacement. Standard JVMs usually permit only method-body changes. Returns class outcomes, compiler diagnostics, and active-frame impacts; restores breakpoints after replacement.",
 };
+
+export const serverInstructions = "Use Java tools for symbols and compiler feedback; edit source with file tools. Paths are workspace-relative. Source lines/columns are one-based Unicode code points; range ends are exclusive. Targets use workspace qualifiedName or path+line: omit column for the innermost enclosing declaration, include it for an exact position. Batch related lookups in queries (cap 20): results preserve order with independent options/cursors and per-entry errors. Tests use tests; unused-code analysis uses paths. To paginate, repeat the same input with nextCursor; stale/expired cursors require restarting without it. Symbol/reference snapshots cache for 2 minutes. Numeric controls clamp to integer ranges; oversized arrays keep their first allowed entries. inputWarnings reports adjustments/omissions. Source coordinates clamp to file bounds; reversed ranges collapse to their start. Source uses configured encoding, otherwise UTF-8 with Windows-1252 fallback. Semantic tools wait for initial JDT readiness; java_status with waitForReady=true observes it without fixed delays. After edits, check diagnostics and compile; use Maven/Gradle for full build lifecycles or integration setup. Debug session operations require sessionId from java_debug_attach or java_run_tests(debug=true); use returned handles and refresh stop/frame/value handles after continue or step.";
 
 export function buildMcpServer(service: JavaService, config: Config, logger: Logger, debug?: DebugService): McpServer {
   const debuggerService = debug ?? new DebugService(config, logger, service);
-  const server = new McpServer({ name: application.name, version: application.version }, { capabilities: { tools: { listChanged: false } }, instructions: "Every Java tool automatically waits on the same shared JDT semantic-readiness gate; do not use a fixed startup delay. java_status with waitForReady=true observes that gate explicitly. Use semantic tools for Java symbols and ordinary file/search/patch tools for source changes. Use java_find_affected_tests to select fast candidate tests, then batch independent selectors in java_run_tests: selected tests and concurrent calls execute in parallel after sharing compilation, so do not batch tests requiring exclusive shared resources. Set compileProjectOnly=true when compiling only the selected JDT projects is safe. Use Maven/Gradle when lifecycle plugins, code generation, packaging, integration-test setup, or full-suite assurance matters. Run diagnostics after patches and ECJ compilation before completion. For runtime debugging, discover a local JDWP target, attach one session, set breakpoints, and treat stopId/frameId/valueId handles as invalid after continue or step; detach without terminating the target when done." });
+  const server = new McpServer({ name: application.name, version: application.version }, { capabilities: { tools: { listChanged: false } }, instructions: serverInstructions });
   const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   type Registration = (name: string, config: { description: string; inputSchema: object; annotations: object }, callback: (input: unknown, context: { mcpReq: { signal: AbortSignal } }) => Promise<object>) => unknown;
   const registerTool = server.registerTool.bind(server) as unknown as Registration;
@@ -49,22 +50,25 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   const register = <N extends ToolName>(name: N, handler: (input: ToolInput<N>, signal: AbortSignal) => Promise<object> | object): void => {
     const annotations = name === "java_compile" || name === "java_debug_attach" || name === "java_debug_set_breakpoints" || name === "java_debug_execute" || name === "java_debug_detach" || name === "java_debug_hot_swap" ? { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false } : name === "java_run_tests" ? { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } : name === "java_update_projects" ? { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } : readAnnotations;
     registerTool(name, { description: descriptions[name], inputSchema: inputs[name], annotations }, async (input, context) => {
+      const normalized = normalizeInput(inputs[name], input);
+      const inputWarnings = normalized.warnings;
       try {
-        const parsed = inputs[name].parse(input) as ToolInput<N>;
-        const value = await abortable(Promise.resolve(handler(parsed, context.mcpReq.signal)), context.mcpReq.signal);
+        const parsed = inputs[name].parse(normalized.input) as ToolInput<N>;
+        const value = await abortable(Promise.resolve(withInputWarnings(inputWarnings, () => handler(parsed, context.mcpReq.signal))), context.mcpReq.signal);
         let structuredContent: Record<string, unknown>;
         try {
-          structuredContent = outputs[name].parse(enforceToolBudget(name, value, config.resultBudget)) as Record<string, unknown>;
+          structuredContent = outputs[name].parse(enforceToolBudget(name, inputWarnings.length ? { ...value, inputWarnings } : value, config.resultBudget)) as Record<string, unknown>;
         } catch (error) {
           throw outputValidationError(name, error, logger);
         }
-        const text = config.resultMode === "text" ? textResult(name, structuredContent) : summary(structuredContent);
+        const resultText = config.resultMode === "text" ? textResult(name, structuredContent) : summary(structuredContent);
+        const text = [resultText, ...inputWarnings.map(w => `Warning: ${w.message}`)].join("\n");
         return { content: [{ type: "text" as const, text }], structuredContent };
       } catch (error) {
         if (context.mcpReq.signal.aborted) throw context.mcpReq.signal.reason;
         const e = error instanceof JavaLspMcpError ? error : new JavaLspMcpError("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
         logger.error(`${name} failed`, { code: e.code, message: e.message });
-        return { isError: true, content: [{ type: "text" as const, text: `${e.code}: ${e.message}` }], structuredContent: { code: e.code, message: e.message, ...(e.details !== undefined && { details: e.details }) } };
+        return { isError: true, content: [{ type: "text" as const, text: [`${e.code}: ${e.message}`, ...inputWarnings.map(w => `Warning: ${w.message}`)].join("\n") }], structuredContent: { code: e.code, message: e.message, ...(inputWarnings.length && { inputWarnings }), ...(e.details !== undefined && { details: e.details }) } };
       }
     });
   };
@@ -72,16 +76,16 @@ export function buildMcpServer(service: JavaService, config: Config, logger: Log
   register("java_outline", i => service.outline(i));
   register("java_search_symbols", (i, signal) => runQueryBatch(i.queries, q => service.search(q), signal));
   register("java_find_definition", (i, signal) => runQueryBatch(i.queries, q => service.definition(q), signal));
-  register("java_find_references", i => service.references(i));
-  register("java_call_hierarchy", i => service.callHierarchy(i));
-  register("java_type_hierarchy", i => service.typeHierarchy(i));
+  register("java_find_references", (i, signal) => runQueryBatch(i.queries, q => service.references(q), signal));
+  register("java_call_hierarchy", (i, signal) => runQueryBatch(i.queries, q => service.callHierarchy(q), signal));
+  register("java_type_hierarchy", (i, signal) => runQueryBatch(i.queries, q => service.typeHierarchy(q), signal));
   register("java_diagnostics", (i, signal) => service.diagnostics(i, signal));
   register("java_compile", i => service.compile(i));
   register("java_run_tests", (i, signal) => i.debug ? debuggerService.runTests(i, signal) : service.runTests(i, signal));
   register("java_update_projects", (i, signal) => service.updateProjects(i, signal));
-  register("java_find_affected_tests", (i, signal) => service.affectedTests(i, signal));
+  register("java_find_affected_tests", (i, signal) => runQueryBatch(i.queries, q => service.affectedTests(q, signal), signal));
   register("java_find_unused_code", (i, signal) => service.unusedCode(i, signal));
-  register("java_code_actions", i => service.codeActions(i));
+  register("java_code_actions", (i, signal) => runQueryBatch(i.queries, q => service.codeActions(q), signal));
   register("java_edit_preview", i => service.editPreview(i));
   register("java_debug_targets", i => debuggerService.targets(i));
   register("java_debug_attach", i => debuggerService.attach(i));
@@ -118,7 +122,7 @@ export function outputValidationError(name: ToolName, error: unknown, logger: Lo
 }
 
 export function describeTools(): object {
-  return { tools: (Object.keys(inputs) as ToolName[]).map(name => ({ name, description: descriptions[name], inputSchema: z.toJSONSchema(inputs[name], { io: "input" }), outputSchema: z.toJSONSchema(outputs[name], { io: "output" }) })) };
+  return { instructions: serverInstructions, tools: (Object.keys(inputs) as ToolName[]).map(name => ({ name, description: descriptions[name], inputSchema: z.toJSONSchema(inputs[name], { io: "input" }), outputSchema: z.toJSONSchema(outputs[name], { io: "output" }) })) };
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -141,7 +145,8 @@ export function enforceToolBudget(name: ToolName, value: object, budget: number)
 }
 
 function summary(value: Record<string, unknown>): string { if (Array.isArray(value.results)) return value.results.map((item, index) => `${index + 1}: ${"error" in item ? `${item.error.code}: ${item.error.message}` : summary(item)}`).join("\n"); if (value.status === "partial") return "partial; retry pending paths"; const count = ["symbols", "definitions", "references", "actions", "diagnostics", "files", "edges", "tests", "candidates"].map(key => value[key]).find(Array.isArray)?.length; if (typeof count === "number") return `${count} result${count === 1 ? "" : "s"}`; if (typeof value.state === "string") return value.state; return "complete"; }
-function textResult(name: ToolName, value: Record<string, unknown>): string {
+export function textResult(name: ToolName, value: Record<string, unknown>): string {
+  if (Array.isArray(value.results)) return value.results.map((item, index) => `${index + 1}: ${"error" in item ? `${item.error.code}: ${item.error.message}` : textResult(name, item)}`).join("\n");
   if (name === "java_find_references") return ((value.references as Array<Record<string, unknown>> | undefined) ?? []).map(item => `${String(item.path)}:${String(item.line)}:${String(item.column)}: ${String(item.text ?? "")}`).join("\n") || "no results";
   if (name === "java_diagnostics") {
     if (value.status === "partial") return "partial; retry pending paths";
