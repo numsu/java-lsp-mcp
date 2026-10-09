@@ -31,7 +31,7 @@ java-lsp-mcp/bin/java-lsp-mcp serve --workspace /absolute/path/to/project --trus
 
 On Windows use `bin\java-lsp-mcp.cmd`. Then verify with `java-lsp-mcp doctor --workspace /project`.
 
-To use it in VS Code, add the launcher to `.vscode/mcp.json` in your project:
+To use it in VS Code, add the launcher to `.vscode/mcp.json` in your project, or for your user only, save it to `~/.copilot/mcp-config.json`
 
 ```json
 {
@@ -43,6 +43,7 @@ To use it in VS Code, add the launcher to `.vscode/mcp.json` in your project:
   }
 }
 ```
+
 
 `java-lsp-mcp print-config generic --workspace /project --trust-workspace` prints the equivalent snippet for other clients.
 
